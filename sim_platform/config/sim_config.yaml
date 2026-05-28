@@ -1,0 +1,26 @@
+# 仿真配置文件
+simulation:
+  dt: 0.01                 # 仿真步长 (s), 100Hz
+  target_fps: 60           # 目标刷新帧率
+  trajectory_length: 5000  # 轨迹保留点数
+
+# 2D 视图配置
+view:
+  default_zoom: 2.0        # 默认缩放 (像素/米)
+  grid_spacing: 10.0       # 网格间距 (m)
+  min_zoom: 0.1
+  max_zoom: 20.0
+  vehicle_color: "#00ff88" # 车辆颜色
+  trail_color: "#00d4ff"   # 轨迹颜色
+  grid_color: "rgba(255,255,255,0.08)"
+  background_color: "#1a1a2e"
+
+# 初始车辆状态
+initial_state:
+  x: 0.0
+  y: 0.0
+  theta: 0.0               # 航向角 (rad), 0=朝东
+  velocity: 0.0             # 初始速度 (m/s)
+  steer_angle: 0.0          # 前轮转角 (rad)
+  gear: 2                   # 档位: 0=P, 1=R, 2=N, 3=D
+  brake_pressure: 0.0       # 制动压力 (MPa)

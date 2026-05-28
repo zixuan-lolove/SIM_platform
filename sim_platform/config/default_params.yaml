@@ -1,0 +1,41 @@
+# 电动宽体矿卡默认车辆参数
+vehicle:
+  # === 基本尺寸 ===
+  wheelbase: 4.2           # 轴距 L (m)
+  length: 9.5              # 车长 (m)
+  width: 3.7               # 车宽 (m)
+  height: 4.0              # 车高 (m)
+  front_track: 2.8         # 前轮距 (m)
+  rear_track: 2.8          # 后轮距 (m)
+
+  # === 悬臂尺寸 ===
+  front_overhang: 1.2      # 前轴到前保险杠距离 l_f (m)
+  rear_overhang: 1.1       # 后轴到后保险杠距离 l_r (m)
+
+  # === 质心位置 ===
+  cog_to_front_axle: 2.1   # 前轴到质心距离 a (m)
+  cog_to_rear_axle: 2.1    # 后轴到质心距离 b (m)
+
+  # === 转向参数 ===
+  steer_ratio: 20.0        # 转向传动比 i_s (方向盘转角/前轮转角)
+  max_steer_angle: 35.0    # 最大前轮转角 (deg)
+
+  # === 质量参数 ===
+  mass_empty: 30000.0      # 空载质量 (kg)
+  mass_full: 95000.0       # 满载质量 (kg)
+  max_payload: 65000.0     # 最大载重 (kg)
+
+  # === 制动参数 ===
+  max_brake_pressure: 10.0 # 最大制动压力 (MPa)
+  brake_gain: 0.5          # 制动增益 k_b (m/s²/MPa)
+
+  # === 动力参数 ===
+  max_speed: 30.0          # 最高车速 (km/h)
+  speed_time_constant: 0.5 # 速度响应时间常数 τ_v (s)
+
+  # === 轮胎参数 ===
+  tire_radius: 0.85        # 轮胎滚动半径 (m)
+  rolling_resistance: 0.02 # 滚动阻力系数
+
+  # === 运动学约束 ===
+  min_turn_radius: 15.0    # 最小转弯半径 (m)

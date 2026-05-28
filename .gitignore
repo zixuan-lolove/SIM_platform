@@ -1,0 +1,38 @@
+# C++ 子模块 (独立仓库，暂不纳入主仓库)
+can_transformer/
+control/
+gateway/
+planning/
+proto/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# 下载文件 (地图/任务)
+map_file/
+task_file/
+sim_maps/
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 配置文件 (含敏感信息)
+sim_platform/config/cloud_config.ini
+
+# 临时文件
+*.tmp
+*.log
+.DS_Store
+
+# 大文件
+*.pdf
