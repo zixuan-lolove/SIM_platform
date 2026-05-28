@@ -56,7 +56,7 @@ class ReferenceLineManager:
         self._ref_lines: list[ReferenceLine] = []
         self._current_idx: int = 0
         self._right_of_way_index: int = 0
-        self._stop_index: int = 0
+        self._stop_index: int = 10 ** 9  # Sentinel: 匹配 C++ uninitialized uint16_t (大值，min-tracking 初始态)
         self._total_points: int = 0
 
     # ========== 属性 ==========
@@ -111,6 +111,7 @@ class ReferenceLineManager:
         is_reverse=True → direction=0 (倒车), is_reverse=False → direction=1 (前进)
         """
         self._ref_lines.clear()
+        self._stop_index = 10 ** 9  # 重置为 sentinel，匹配 C++ 新任务时 stop_index 未初始化
         self._current_idx = 0
         self._total_points = len(task_traj.points)
 
@@ -141,18 +142,15 @@ class ReferenceLineManager:
             end_index=len(pts) - 1,
         ))
 
-        # 默认: stop_index = 最后一段的最后一个点 (局部索引 = len-1)
         # right_of_way_index = 倒数第二段的 is_park 点附近
         if len(self._ref_lines) >= 2:
-            self._stop_index = len(self._ref_lines[-1].points) - 1
             # 查找最后一个 is_park 点作为路权终点
             for i in range(len(pts) - 1, -1, -1):
                 if pts[i].is_park:
                     self._right_of_way_index = i
                     break
         elif len(self._ref_lines) == 1:
-            self._stop_index = len(self._ref_lines[0].points) - 1
-            self._right_of_way_index = self._stop_index
+            self._right_of_way_index = len(self._ref_lines[0].points) - 1
 
     def advance_to_next(self) -> bool:
         """切换到下一段参考线，返回 False 表示已是最后一段"""
@@ -177,6 +175,26 @@ class ReferenceLineManager:
                 best = i
         return best
 
+    def find_closest_by_latlon(self, lat: float, lon: float) -> int:
+        """在全局点序列中查找离 (lat, lon) 最近的点索引
+
+        对应 C++ Tool::FindNearestPointIndex(end_pos, reference_line)。
+        无 MA 时 endpoint=(0,0) → autor_index ≈ 0，min-tracking 后 stop_index ≈ 0。
+        """
+        if self._total_points == 0:
+            return 0
+        all_points = self.get_all_points()
+        best = 0
+        best_dist = float("inf")
+        for i, p in enumerate(all_points):
+            dlat = p.lat - lat
+            dlon = p.lon - lon
+            d = dlat * dlat + dlon * dlon
+            if d < best_dist:
+                best_dist = d
+                best = i
+        return best
+
     def get_all_points(self) -> list[TrajPoint]:
         """获取所有参考线的全部点（扁平化）"""
         all_points = []
@@ -187,6 +205,17 @@ class ReferenceLineManager:
     def get_current_segment_points(self) -> list[TrajPoint]:
         """获取当前活跃段的全部点"""
         return self.current.points
+
+    def update_current(self, ref_line: ReferenceLine) -> None:
+        """用单个 ReferenceLine 替换当前参考线列表
+
+        用于从 GatewaySim 的 ref_mgr 同步数据到引擎共享的 ref_mgr，
+        确保 UI 始终能读取到参考线数据（即使 PlanningSim 因坐标框架不一致拒绝了任务）。
+        """
+        self._ref_lines.clear()
+        self._ref_lines.append(ref_line)
+        self._current_idx = 0
+        self._total_points = len(ref_line.points)
 
     def clear(self):
         self._ref_lines.clear()

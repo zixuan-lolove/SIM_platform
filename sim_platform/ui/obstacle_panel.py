@@ -232,8 +232,8 @@ class ObstaclePanel(QWidget):
                 background: #2a3a5c;
                 border: 1px solid #3a4a6c;
                 border-radius: 3px;
-                padding: 4px 8px;
-                font-size: 11px;
+                padding: 5px 10px;
+                font-size: 12px;
             }
             QPushButton:hover { background: #3a5a8c; }
             QPushButton:pressed { background: #1a2a44; }
@@ -247,8 +247,8 @@ class ObstaclePanel(QWidget):
                 background: #3a1a1a;
                 border: 1px solid #5a2a2a;
                 border-radius: 3px;
-                padding: 4px 8px;
-                font-size: 11px;
+                padding: 5px 10px;
+                font-size: 12px;
             }
             QPushButton:hover { background: #5a2a2a; }
         """

@@ -46,7 +46,7 @@ class SimEngine:
         self.target_brake_pressure: float = 0.0    # 目标制动压力 (MPa)
 
         # 轨迹记录
-        self.max_trail_points: int = 5000
+        self.max_trail_points: int = 60000
         self.trail_x: deque[float] = deque(maxlen=self.max_trail_points)
         self.trail_y: deque[float] = deque(maxlen=self.max_trail_points)
 

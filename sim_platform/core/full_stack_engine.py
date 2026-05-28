@@ -23,6 +23,7 @@ from .sim_message_bus import (
     LOCALIZATION,
     CHASSIS,
     CONTROL_CMD,
+    CLOUD_DISPATCH_TASK,
 )
 from ..models.vehicle_params import VehicleParams
 from ..models.trajectory import Trajectory, TrajectoryPoint
@@ -31,6 +32,8 @@ from ..models.sim_messages import (
     Chassis,
     PlanningResult,
     ControlCmd,
+    CloudDispatchTask,
+    MoveAuthority,
 )
 from ..gateway_sim.gateway_sim import GatewaySim
 from ..gateway_sim.real_cloud_client import RealCloudClient
@@ -91,6 +94,9 @@ class FullStackEngine(SimEngine):
         self.perception = PerceptionSim(self.bus)
         self.planning = PlanningSim(self.bus, self.ref_mgr)
 
+        # 订阅云端任务下发 (在 GatewaySim 之后订阅，确保回调在 Gateway 加载完成后执行)
+        self.bus.subscribe(CLOUD_DISPATCH_TASK, self._on_cloud_task_dispatched)
+
         # 控制器
         self._full_stack_controller: Controller = controller or LatLonController(params)
 
@@ -113,6 +119,9 @@ class FullStackEngine(SimEngine):
         self._last_perception_time: float = -1.0
         self._last_gateway_time: float = -1.0
 
+        # 当前任务 SN (用于判断 retained 消息是否重复)
+        self._last_task_sn: str = ""
+
         # 默认 AUTO 模式
         self.control_mode = ControlMode.AUTO
         self._full_stack_controller.reset()
@@ -132,57 +141,78 @@ class FullStackEngine(SimEngine):
         return self._latest_control_cmd
 
     @property
+    def latest_move_authority(self) -> Optional[MoveAuthority]:
+        return self.planning._latest_move_authority
+
+    @property
     def bus_stats(self) -> dict:
         return self.bus.get_stats()
 
     # ========== 任务加载 ==========
 
-    def load_task_and_start(self, file_path: str) -> bool:
-        """加载任务轨迹文件并启动仿真
+    def _on_cloud_task_dispatched(self, topic: str, msg: CloudDispatchTask) -> None:
+        """云端任务下发后的初始化 — 在 GatewaySim 加载完成后执行
 
-        流程: Gateway 解析 .traj → WGS84→ENU 转换 → 发布 TaskToPlanning → Planning 构建参考线
-
-        参考原点来源 (优先级):
-          1. INS 面板设定 (main_window._on_ins_applied → converter.set_reference)
-          2. 未设 INS 时回退到轨迹第一个点 (向后兼容本地测试)
-        轨迹中 WGS84 坐标通过 converter.latlon_to_xy() 转换为 ENU 坐标。
+        bus 回调顺序保证: GatewaySim 先订阅 → PlanningSim → FullStackEngine
+        因此此回调执行时 ref_mgr 已包含最新任务轨迹点。
         """
-        success = self.gateway.load_task_file(file_path)
-        if success:
-            # 若 INS 未设定参考原点，回退用轨迹第一个点
-            if self._ref_lat == 0.0 and self._ref_lon == 0.0:
-                ref = self.gateway.reference_line_manager.current
-                if ref and ref.points:
-                    self._ref_lat = ref.points[0].lat
-                    self._ref_lon = ref.points[0].lon
-                    self._converter.set_reference(self._ref_lat, self._ref_lon)
+        if msg.msg_type != "dispatch_task" or msg.dispatch_task is None:
+            return
 
-            # 用 converter 从 lat/lon 重新计算所有轨迹点的 ENU 坐标
-            self._recompute_traj_enu()
+        dt = msg.dispatch_task
+        if not dt.task_file_path:
+            return
 
-            self._full_stack_controller.reset()
+        # 同一任务号不重复初始化 (MQTT 重连时 retained 消息重复下发)
+        if dt.task_sn == self._last_task_sn and self._last_task_sn:
+            logger.debug(f"[FullStack] Task sn={dt.task_sn} already initialized, skipping")
+            return
 
-            # 车辆初始航向: 优先 INS 设定的 heading，否则取轨迹第一个点
-            if self.state is not None and self.state.theta != 0.0:
-                init_theta = self.state.theta
-            else:
-                ref = self.gateway.reference_line_manager.current
-                init_theta = ref.points[0].theta if (ref and ref.points) else 0.0
+        ref = self.gateway.reference_line_manager.current
+        if not ref.points:
+            return
 
-            self.reset(VehicleState(x=0.0, y=0.0, theta=init_theta), clear_trail=False)
-        return success
+        logger.info(f"[FullStack] Cloud task initializing: sn={dt.task_sn}, "
+                    f"points={len(ref.points)}")
+        self._last_task_sn = dt.task_sn
+
+        # 若 INS 未设定参考原点，回退用轨迹第一个点
+        if self._ref_lat == 0.0 and self._ref_lon == 0.0:
+            self._ref_lat = ref.points[0].lat
+            self._ref_lon = ref.points[0].lon
+            self._converter.set_reference(self._ref_lat, self._ref_lon)
+
+        # 用 converter 从 lat/lon 重新计算所有轨迹点的 ENU 坐标
+        self._recompute_traj_enu()
+
+        self._full_stack_controller.reset()
+
+        # 车辆初始位置设为轨迹起点，航向取轨迹第一个点
+        init_theta = ref.points[0].theta if ref.points else 0.0
+        self.reset(VehicleState(x=0.0, y=0.0, theta=init_theta), clear_trail=False)
 
     def _recompute_traj_enu(self) -> None:
         """用 converter 从 WGS84 lat/lon 重新计算所有参考线点的 ENU (x,y,theta,s)
 
-        在 INS 设定参考原点之后、init_planning 之前调用。
-        替换 .traj 文件中采图时的原始 ENU 坐标。
+        在 INS 设定参考原点之后调用。替换 .traj 文件中采图时的原始 ENU 坐标。
+
+        若 self.ref_mgr 为空（PlanningSim 2m 检查拒绝了任务），
+        则先从 GatewaySim 的 ref_mgr 同步参考线数据。
         """
         import math
 
         all_pts = self.ref_mgr.get_all_points()
         if not all_pts:
-            return
+            # PlanningSim 的 2m 邻近检查可能因坐标框架不一致而拒绝任务，
+            # 此时 self.ref_mgr 为空。从 GatewaySim 的 ref_mgr 同步数据，
+            # 确保 UI 能绘制参考线。
+            gw_ref = self.gateway.reference_line_manager.current
+            if not gw_ref.points:
+                return
+            self.ref_mgr.update_current(gw_ref)
+            all_pts = self.ref_mgr.get_all_points()
+            if not all_pts:
+                return
 
         for pt in all_pts:
             pt.x, pt.y = self._converter.latlon_to_xy(pt.lat, pt.lon)
@@ -407,6 +437,7 @@ class FullStackEngine(SimEngine):
         if clear_trail:
             self._ref_lat = 0.0
             self._ref_lon = 0.0
+            self._last_task_sn = ""
         self._full_stack_controller.reset()
 
     def emergency_stop(self) -> None:

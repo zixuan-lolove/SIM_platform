@@ -153,12 +153,12 @@ class StatusPanel(QWidget):
         self.setStyleSheet("""
             QGroupBox {
                 color: #b0b8d0;
-                font-size: 11px;
+                font-size: 13px;
                 font-weight: bold;
                 border: 1px solid #2a3a5c;
                 border-radius: 4px;
                 margin-top: 10px;
-                padding-top: 10px;
+                padding-top: 12px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -167,7 +167,7 @@ class StatusPanel(QWidget):
             }
             QLabel {
                 color: #c8d0e0;
-                font-size: 11px;
+                font-size: 13px;
             }
         """)
         self.gear_big_label.setStyleSheet("""
@@ -262,15 +262,15 @@ class StatusPanel(QWidget):
         if key in self._value_labels:
             if warn:
                 self._value_labels[key].setStyleSheet(
-                    "color: #ff6644; font-size: 11px; font-weight: bold;")
+                    "color: #ff6644; font-size: 13px; font-weight: bold;")
             else:
                 self._value_labels[key].setStyleSheet(
-                    "color: #00ff88; font-size: 11px;")
+                    "color: #00ff88; font-size: 13px;")
 
     def _reset_color(self, key: str):
         if key in self._value_labels:
             self._value_labels[key].setStyleSheet(
-                "color: #c8d0e0; font-size: 11px;")
+                "color: #c8d0e0; font-size: 13px;")
 
     def _set(self, key: str, value: str):
         if key in self._value_labels:

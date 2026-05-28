@@ -318,12 +318,12 @@ class ControlPanel(QWidget):
         self.setStyleSheet("""
             QGroupBox {
                 color: #b0b8d0;
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: bold;
                 border: 1px solid #2a3a5c;
                 border-radius: 4px;
                 margin-top: 12px;
-                padding-top: 12px;
+                padding-top: 14px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -332,7 +332,7 @@ class ControlPanel(QWidget):
             }
             QLabel {
                 color: #c8d0e0;
-                font-size: 11px;
+                font-size: 13px;
             }
             QSlider::groove:horizontal {
                 height: 6px;
@@ -358,8 +358,8 @@ class ControlPanel(QWidget):
                 color: #e0e0e0;
                 border: 1px solid #2a3a5c;
                 border-radius: 3px;
-                padding: 3px 6px;
-                font-size: 12px;
+                padding: 4px 6px;
+                font-size: 13px;
                 min-width: 80px;
             }
             QPushButton {
@@ -402,9 +402,9 @@ class ControlPanel(QWidget):
                 color: #c8d0e0;
                 border: 1px solid #2a3a5c;
                 border-radius: 3px;
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: bold;
-                padding: 4px 8px;
+                padding: 5px 10px;
             }
             QPushButton:hover {
                 background: #2a3a5c;
@@ -424,8 +424,8 @@ class ControlPanel(QWidget):
                 color: #a0b8d0;
                 border: 1px solid #2a4a5c;
                 border-radius: 3px;
-                font-size: 11px;
-                padding: 4px 6px;
+                font-size: 12px;
+                padding: 5px 8px;
             }
             QPushButton:hover {
                 background: #2a4a5c;
@@ -443,8 +443,8 @@ class ControlPanel(QWidget):
                 color: #88a8c0;
                 border: 1px solid #2a4a5c;
                 border-radius: 3px;
-                font-size: 10px;
-                padding: 3px 4px;
+                font-size: 12px;
+                padding: 4px 6px;
             }
             QPushButton:hover {
                 background: #2a4a5c;

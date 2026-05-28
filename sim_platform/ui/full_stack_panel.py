@@ -1,10 +1,10 @@
 """全栈仿真面板 — 任务信息、模块状态、操作按钮 (F-15)"""
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QFileDialog, QProgressBar,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QGroupBox, QProgressBar,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt
 
 
 class FullStackPanel(QWidget):
@@ -12,8 +12,6 @@ class FullStackPanel(QWidget):
 
     显示任务信息、各模块状态文字、操作按钮。
     """
-
-    task_load_requested = pyqtSignal(str)  # file_path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -88,6 +86,9 @@ class FullStackPanel(QWidget):
             ("param_md5",    "文件 MD5: —"),
             ("param_url",    "下载 URL: —"),
             ("param_local",  "本地路径: —"),
+            ("task_file",    "任务文件: —"),
+            ("task_md5",     "任务 MD5: —"),
+            ("task_url",     "任务 URL: —"),
         ]
         for key, text in downlink_fields:
             lbl = QLabel(text)
@@ -119,6 +120,58 @@ class FullStackPanel(QWidget):
 
         layout.addWidget(uplink_group)
 
+        # ── 路权信息 (云端下发) ──
+        row_group = QGroupBox("路权信息 Right-of-Way")
+        row_group.setStyleSheet(self._group_style())
+        row_layout = QVBoxLayout(row_group)
+        row_layout.setContentsMargins(3, 3, 3, 3)
+        row_layout.setSpacing(2)
+
+        self._row_labels: dict[str, QLabel] = {}
+        row_fields = [
+            ("row_segments",  "分段数: —"),
+            ("row_start_pt",  "起点: —"),
+            ("row_end_pt",    "终点: —"),
+            ("row_line_snq",  "车道序列: —"),
+            ("row_last_lane", "末段车道: —"),
+            ("row_stop_idx",  "停车索引: —"),
+        ]
+        for key, text in row_fields:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(self._label_style())
+            lbl.setWordWrap(True)
+            row_layout.addWidget(lbl)
+            self._row_labels[key] = lbl
+
+        layout.addWidget(row_group)
+
+        # ── 驾驶状态 (StatusType 上行字段) ──
+        vs_group = QGroupBox("驾驶状态 Vehicle Status")
+        vs_group.setStyleSheet(self._group_style())
+        vs_layout = QVBoxLayout(vs_group)
+        vs_layout.setContentsMargins(3, 3, 3, 3)
+        vs_layout.setSpacing(2)
+
+        self._vs_labels: dict[str, QLabel] = {}
+        vs_fields = [
+            ("vs_driving_mode",  "驾驶模式: —"),
+            ("vs_acc_state",     "ACC 状态: —"),
+            ("vs_gps_state",     "GPS 状态: —"),
+            ("vs_gear",          "档位: —"),
+            ("vs_brake",         "制动状态: —"),
+            ("vs_lock",          "锁止状态: —"),
+            ("vs_emergency_brake", "紧急制动: —"),
+            ("vs_load",          "载重状态: —"),
+        ]
+        for key, text in vs_fields:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(self._label_style())
+            lbl.setWordWrap(True)
+            vs_layout.addWidget(lbl)
+            self._vs_labels[key] = lbl
+
+        layout.addWidget(vs_group)
+
         # ── 模块状态 ──
         mod_group = QGroupBox("模块状态")
         mod_group.setStyleSheet(self._group_style())
@@ -136,19 +189,6 @@ class FullStackPanel(QWidget):
 
         layout.addWidget(mod_group)
 
-        # ── 操作按钮 ──
-        btn_group = QGroupBox("操作")
-        btn_group.setStyleSheet(self._group_style())
-        btn_layout = QVBoxLayout(btn_group)
-        btn_layout.setContentsMargins(3, 3, 3, 3)
-        btn_layout.setSpacing(2)
-
-        btn_load = QPushButton("加载 .traj 任务文件")
-        btn_load.clicked.connect(self._on_load_task)
-        btn_load.setStyleSheet(self._btn_style())
-        btn_layout.addWidget(btn_load)
-
-        layout.addWidget(btn_group)
         layout.addStretch()
 
     # ========== 公共接口 ==========
@@ -283,9 +323,27 @@ class FullStackPanel(QWidget):
         # ── 步骤5: 下发任务状态 ──
         task_status = stats.get("task_status", 0)
         load_state = stats.get("load_state", 0)
+        task_dl_status = stats.get("task_download_status", "")
+        task_dl_name = stats.get("task_download_name", "")
+
         task_status_text = {0: "空闲", 1: "执行中", 2: "完成"}.get(task_status, str(task_status))
         load_state_text = {0: "空载", 1: "装载", 2: "卸载"}.get(load_state, str(load_state))
-        if task_status > 0:
+
+        if task_dl_status == "downloading":
+            name_hint = f" ({task_dl_name})" if task_dl_name else ""
+            self._cloud_labels["task"].setText(
+                _step_active(f"下发任务: 下载中{name_hint}")
+            )
+        elif task_dl_status == "success":
+            name_hint = f" ({task_dl_name})" if task_dl_name else ""
+            self._cloud_labels["task"].setText(
+                _step_done(f"下发任务: 已下载{name_hint}")
+            )
+        elif task_dl_status == "failed":
+            self._cloud_labels["task"].setText(
+                _step_fail(f"下发任务: 下载失败")
+            )
+        elif task_status > 0:
             self._cloud_labels["task"].setText(
                 _step_done(f"下发任务: {task_status_text} | {load_state_text}")
             )
@@ -312,7 +370,7 @@ class FullStackPanel(QWidget):
             )
 
     def set_downlink_params(self, stats: dict):
-        """更新下行参数显示 (云端下发的服务器参数)"""
+        """更新下行参数显示 (云端下发的服务器参数 + 任务下载)"""
         map_file = stats.get("map_file", "")
         map_md5 = stats.get("map_md5", "")
         download_url = stats.get("download_base_url", "")
@@ -339,6 +397,30 @@ class FullStackPanel(QWidget):
             f'本地路径: {local_path if local_path else "—"}'
         )
 
+        # 任务文件下载
+        task_dl_status = stats.get("task_download_status", "")
+        task_dl_url = stats.get("task_download_url", "")
+        task_dl_name = stats.get("task_download_name", "")
+        task_md5 = stats.get("task_md5", "")
+
+        task_status_text = {
+            "": "—",
+            "downloading": '<span style="color:#ffcc00;">下载中...</span>',
+            "success": '<span style="color:#00ff88;">已下载</span>',
+            "failed": '<span style="color:#ff4444;">下载失败</span>',
+        }.get(task_dl_status, task_dl_status)
+
+        task_name_display = task_dl_name if task_dl_name else "—"
+        self._downlink_labels["task_file"].setText(
+            f'任务文件: {task_name_display}  {task_status_text}'
+        )
+        self._downlink_labels["task_md5"].setText(
+            f'任务 MD5: {task_md5 if task_md5 else "—"}'
+        )
+        self._downlink_labels["task_url"].setText(
+            f'任务 URL: {task_dl_url if task_dl_url else "—"}'
+        )
+
     def set_uplink_fields(self, stats: dict):
         """更新上行发送字段显示 (停车原因等)"""
         reason_code = stats.get("reason_code", 0)
@@ -352,15 +434,101 @@ class FullStackPanel(QWidget):
         self._uplink_labels["run_state"].setText(f"运行状态: {run_state_text}")
         self._uplink_labels["stop_reason"].setText(f"停车原因: {stop_reason_text}")
 
-    # ========== 槽 ==========
+    def set_move_authority(self, ma) -> None:
+        """更新路权信息显示 (云端下发的 MovemntAuthoritySend)
 
-    def _on_load_task(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "加载任务轨迹文件", "",
-            "轨迹文件 (*.traj *.csv);;所有文件 (*)"
+        ma: MoveAuthority dataclass 或 None
+        """
+        if ma is None:
+            for key in self._row_labels:
+                self._row_labels[key].setText(
+                    f"{self._row_labels[key].text().split(':')[0]}: —"
+                )
+            return
+
+        seg = ma.segment_count
+        self._row_labels["row_segments"].setText(f"分段数: {seg} 段")
+
+        sp = ma.start_point_lat, ma.start_point_lon
+        ep = ma.endpoint_lat, ma.endpoint_lon
+        if sp != (0.0, 0.0):
+            self._row_labels["row_start_pt"].setText(
+                f"起点: ({ma.start_point_lat:.6f}, {ma.start_point_lon:.6f}) "
+                f"idx={ma.start_point_index} ln={ma.start_point_line_sn}"
+            )
+        else:
+            self._row_labels["row_start_pt"].setText("起点: —")
+
+        self._row_labels["row_end_pt"].setText(
+            f"终点: ({ma.endpoint_lat:.6f}, {ma.endpoint_lon:.6f}) "
+            f"idx={ma.end_point_index} ln={ma.end_point_line_sn}"
         )
-        if path:
-            self.task_load_requested.emit(path)
+
+        snq = ma.line_snq if ma.line_snq else "—"
+        self._row_labels["row_line_snq"].setText(f"车道序列: {snq}")
+
+        if seg > 0:
+            self._row_labels["row_last_lane"].setText(
+                f"末段车道: laneId={ma.last_lane_id} "
+                f"ptIdx={ma.last_point_index} "
+                f"dir={ma.last_direction:.1f}°"
+            )
+        else:
+            self._row_labels["row_last_lane"].setText("末段车道: —")
+
+        self._row_labels["row_stop_idx"].setText(f"停车索引: {ma.stop_index}")
+
+    def set_vehicle_status(self, vs: dict):
+        """更新驾驶状态显示 (StatusType 上行字段)
+
+        vs 字典字段:
+          - driving_mode: 0=人工, 1=自动驾驶, 2=远程接管
+          - acc_state: ACC 状态
+          - gps_state: GPS 定位状态
+          - gear: 档位 (P/R/N/D)
+          - brake: 制动是否踩下
+          - lock: 锁止状态
+          - emergency_brake: 紧急制动
+          - load_state: 载重状态 (0=空载, 1=半载, 2=满载, 3=未知)
+        """
+        dm = vs.get("driving_mode", -1)
+        dm_text = {0: "人工驾驶", 1: "自动驾驶", 2: "远程接管"}.get(dm, f"未知({dm})")
+        dm_color = {0: "#ffcc00", 1: "#00ff88", 2: "#ff8844"}.get(dm, "#ff4444")
+        self._vs_labels["vs_driving_mode"].setText(
+            f'驾驶模式: <span style="color:{dm_color};">{dm_text}</span>'
+        )
+
+        acc = vs.get("acc_state", 0)
+        acc_text = {0: "关闭", 1: "开启"}.get(acc, str(acc))
+        self._vs_labels["vs_acc_state"].setText(f"ACC 状态: {acc_text}")
+
+        gps = vs.get("gps_state", 0)
+        gps_text = {0: "无效", 1: "单点", 2: "差分", 3: "RTK"}.get(gps, str(gps))
+        self._vs_labels["vs_gps_state"].setText(f"GPS 状态: {gps_text}")
+
+        gear = vs.get("gear", 0)
+        gear_map = {0: "P", 1: "R", 2: "N", 3: "D"}
+        gear_text = gear_map.get(gear, str(gear))
+        self._vs_labels["vs_gear"].setText(f"档位: {gear_text}")
+
+        brake = vs.get("brake", 0)
+        brake_text = {0: "释放", 1: "踩下"}.get(brake, str(brake))
+        self._vs_labels["vs_brake"].setText(f"制动状态: {brake_text}")
+
+        lock = vs.get("lock", 0)
+        lock_text = {0: "解锁", 1: "锁定"}.get(lock, str(lock))
+        self._vs_labels["vs_lock"].setText(f"锁止状态: {lock_text}")
+
+        ebrake = vs.get("emergency_brake", 0)
+        ebrake_text = {0: "正常", 1: "急停"}.get(ebrake, str(ebrake))
+        ebrake_color = "#ff4444" if ebrake else "#b0c0d0"
+        self._vs_labels["vs_emergency_brake"].setText(
+            f'紧急制动: <span style="color:{ebrake_color};">{ebrake_text}</span>'
+        )
+
+        load_state = vs.get("load_state", 3)
+        load_text = {0: "空载", 1: "半载", 2: "满载", 3: "未知"}.get(load_state, str(load_state))
+        self._vs_labels["vs_load"].setText(f"载重状态: {load_text}")
 
     # ========== 样式 ==========
 
@@ -369,12 +537,12 @@ class FullStackPanel(QWidget):
         return """
             QGroupBox {
                 color: #c0d0e0;
-                font-size: 10px;
+                font-size: 12px;
                 font-weight: bold;
                 border: 1px solid #2a3a5c;
                 border-radius: 3px;
-                margin-top: 5px;
-                padding-top: 8px;
+                margin-top: 6px;
+                padding-top: 10px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -385,24 +553,5 @@ class FullStackPanel(QWidget):
 
     @staticmethod
     def _label_style() -> str:
-        return "color: #b0c0d0; font-size: 10px; background: transparent; padding: 0px;"
+        return "color: #b0c0d0; font-size: 12px; background: transparent; padding: 1px 0px;"
 
-    @staticmethod
-    def _btn_style() -> str:
-        return """
-            QPushButton {
-                color: #e0e8f0;
-                background: #2a3a5c;
-                border: 1px solid #3a4a6c;
-                border-radius: 3px;
-                padding: 3px 8px;
-                font-size: 10px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: #3a5a8c;
-            }
-            QPushButton:pressed {
-                background: #1a2a44;
-            }
-        """

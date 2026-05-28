@@ -3,7 +3,10 @@
 负责: 任务切换检测、参考线更新、路权处理、任务完成判定、超时检测、停车判断。
 """
 
+import logging
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .planning_sim import PlanningFrame
@@ -40,19 +43,19 @@ class BusinessDecision:
         self._dump_cycle_counter = 0
 
     def proc(self, frame: "PlanningFrame", sim_time: float = 0.0) -> None:
-        """每规划周期执行一次的主决策逻辑"""
+        """每规划周期执行一次的主决策逻辑 — 对应 C++ BussinessDecision::proc
+
+        注意: 2m 任务邻近校验已移至 PlanningSim._handle_new_task，
+        在消息到达时立即执行（早于 plan() 周期），保证拒绝任务时
+        不会更新参考线，与 C++ 行为一致。
+        """
         # 超时检测
         self._judge_over_time(frame, sim_time)
 
-        # 任务更新检测
-        if frame.task_received():
-            frame.accept_task()
-            self._task_index = 0
-
-        # 更新 key_index (车辆在参考线上的最近点)
+        # 更新 key_index (C++ line 53: 在完整 task_trajectory 上查找)
         self._update_key_index(frame)
 
-        # 路权处理 (更新 stop_index)
+        # 路权处理 (C++ lines 34-51: 无条件计算 autor_index + min-tracking + clamp)
         self._update_stop_from_authority(frame)
 
         # 任务完成判定
@@ -66,7 +69,7 @@ class BusinessDecision:
         self._judge_stop(frame)
 
     def _update_key_index(self, frame: "PlanningFrame") -> None:
-        """更新车辆在任务轨迹上的最近点索引"""
+        """更新车辆在完整 task_trajectory 上的最近点索引 (C++ line 53)"""
         if not frame.ref_mgr:
             return
         loc = frame.localization
@@ -75,14 +78,39 @@ class BusinessDecision:
         frame.key_index = frame.ref_mgr.find_closest_index(loc.x, loc.y)
 
     def _update_stop_from_authority(self, frame: "PlanningFrame") -> None:
-        """从路权信息更新停车点"""
-        if frame.move_authority is not None and frame.ref_mgr:
-            frame.ref_mgr.stop_index = frame.move_authority.stop_index
-        # 默认: 当前参考线末尾
-        elif frame.ref_mgr:
-            ref = frame.ref_mgr.current
-            if ref.points:
-                frame.ref_mgr.stop_index = len(ref.points) - 1
+        """路权处理 — 对应 C++ BussinessDecision::proc lines 34-51
+
+        无条件计算 autor_index: 无 MA 时 endpoint=(0,0) → 最近点 ≈ 0，
+        min-tracking 后 stop_index → 0，车辆停车。
+        MA 到达后 endpoint 为正确坐标 → stop_index 更新为路权值。
+        """
+        if not frame.ref_mgr:
+            return
+        ref = frame.ref_mgr.current
+        if not ref.points:
+            return
+
+        # endpoint lat/lon (C++ lines 35-36: 无条件读取，无 MA 时为 0,0)
+        ma = frame.move_authority
+        end_lat = ma.endpoint_lat if ma is not None else 0.0
+        end_lon = ma.endpoint_lon if ma is not None else 0.0
+
+        # 在当前参考线上找最近点 (C++ lines 44-45: getCurrentReferenceLine())
+        autor_index = 0
+        best_dist = float("inf")
+        for i, p in enumerate(ref.points):
+            dlat = p.lat - end_lat
+            dlon = p.lon - end_lon
+            d = dlat * dlat + dlon * dlon
+            if d < best_dist:
+                best_dist = d
+                autor_index = i
+
+        # min-tracking (C++ line 47: updateStopIndex)
+        frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index, autor_index)
+
+        # 无条件钳位到参考线末尾 (C++ lines 49-51)
+        frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index, len(ref.points) - 1)
 
     def _current_task_finish(self, frame: "PlanningFrame") -> bool:
         """判断当前动作是否完成"""
@@ -92,12 +120,21 @@ class BusinessDecision:
         action = frame.action_seq[self._task_index]
 
         if action.action_type == STOP_ACTION:
-            # 接近停车点 (8 个点以内) → 完成
-            if frame.key_index > frame.ref_mgr.stop_index - 8:
-                frame.stop = True
-                return True
-            frame.stop = False
-            return False
+            # C++: 用完整的 task_trajectory 重新计算 task_index, 与 key_index 比较
+            result = False
+            pts = frame.ref_mgr.get_all_points()
+            if pts and frame.localization:
+                loc = frame.localization
+                task_index = frame.ref_mgr.find_closest_index(loc.x, loc.y)
+                # C++: key_index > task_index - 8 (task_index == key_index → 立即完成)
+                if frame.key_index > task_index - 8:
+                    frame.stop = True
+                    result = True
+                else:
+                    frame.stop = False
+                # C++ line 83: updateStopIndex(task_index)
+                frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index, task_index)
+            return result
 
         elif action.action_type == LOAD_ACTION:
             # 装载: 到达即停车 (TODO: 需平台确认装载完成信号)

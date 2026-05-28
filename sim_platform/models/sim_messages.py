@@ -114,12 +114,35 @@ class TaskToPlanning:
 
 @dataclass
 class MoveAuthority:
-    """路权信息 — 对应 MovemntAuthoritySend"""
-    right_of_way_index: int = 0 # 路权终点索引
-    stop_index: int = 0         # 停车点索引
-    endpoint_lat: float = 0.0   # 终点纬度
-    endpoint_lon: float = 0.0   # 终点经度
-    endpoint_heading: float = 0.0  # 终点航向 (deg)
+    """路权信息 — 对应 MovemntAuthoritySend (cloudmsg.proto:249-290)
+
+    C++ 中 BussinessDecision 使用 safeOccupied.endPoint 在参考线上查找 stop_index。
+    """
+    # safeOccupied.endPoint — 行车许可末端点 (路权终点)
+    endpoint_lat: float = 0.0       # 终点纬度
+    endpoint_lon: float = 0.0       # 终点经度
+    end_point_index: int = 0        # 终点在车道上的序号
+    end_point_line_sn: int = 0      # 终点所在车道序号
+
+    # safeOccupied.startPoint — 行车许可开始点 (车辆当前位置)
+    start_point_lat: float = 0.0
+    start_point_lon: float = 0.0
+    start_point_index: int = 0
+    start_point_line_sn: int = 0
+
+    # 参考线上计算的索引
+    right_of_way_index: int = 0     # 路权终点在参考线上的索引 (由 GatewaySim 计算)
+    stop_index: int = 0             # 停车点索引 (由 BusinessDecision.updateStopIndex 更新)
+
+    # MovemntAuthor list
+    segment_count: int = 0          # 路权分段数量 (list 长度)
+    last_lane_id: int = 0           # 最后一段车道编号
+    last_point_index: int = 0       # 最后一段在路径文件中的位置点序号
+    last_direction: float = 0.0     # 最后一段航向角 (deg)
+
+    # safeOccupied.lineSnQ
+    line_snq: str = ""              # 车道线序号序列 (逗号分隔)
+
     timestamp: float = 0.0
 
 

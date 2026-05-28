@@ -4,8 +4,11 @@
 通过 SimMessageBus 订阅输入、发布 PlanningResult。
 """
 
+import logging
 import time
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from ..core.sim_message_bus import (
     SimMessageBus,
@@ -58,24 +61,6 @@ class PlanningFrame:
         self.last_chassis_time: float = 0.0
         self.last_obstacles_time: float = 0.0
 
-        # 新任务标志
-        self._new_task: bool = False
-        self._pending_task: Optional[TaskToPlanning] = None
-
-    def task_received(self) -> bool:
-        return self._new_task
-
-    def accept_task(self) -> Optional[TaskToPlanning]:
-        """消费新任务标志，返回 TaskToPlanning 并清除标志"""
-        self._new_task = False
-        task = self._pending_task
-        self._pending_task = None
-        return task
-
-    def set_new_task(self, task: TaskToPlanning) -> None:
-        self._new_task = True
-        self._pending_task = task
-
 
 class PlanningSim:
     """Planning 仿真器 — 10Hz 规划循环编排 (F-09-09)
@@ -107,6 +92,7 @@ class PlanningSim:
         # 任务状态
         self._action_seq: list[Action] = []
         self._task_traj: Optional[TaskTraj] = None
+        self._pending_validation: bool = False  # 新任务需在 plan() 中做 2m 邻近校验
 
         # 传感器时间戳
         self._last_localization_time: float = 0.0
@@ -166,6 +152,25 @@ class PlanningSim:
         if self._latest_localization is None:
             return None
 
+        # 新任务 2m 邻近校验 — 推迟到 plan() 而非在 _handle_new_task 中执行，
+        # 确保 FullStackEngine 已设置坐标转换器参考原点并重置车辆位置，
+        # 避免因 ENU 坐标框架不一致导致误拒绝。
+        if self._pending_validation:
+            self._pending_validation = False
+            loc = self._latest_localization
+            all_pts = self._ref_mgr.get_all_points()
+            if all_pts:
+                min_dis_sq = min(
+                    (p.x - loc.x) ** 2 + (p.y - loc.y) ** 2 for p in all_pts
+                )
+                if min_dis_sq ** 0.5 > 2.0:
+                    logger.warning(
+                        f"[PlanningSim] Task rejected: vehicle too far from trajectory "
+                        f"(dist={min_dis_sq ** 0.5:.1f}m > 2m)"
+                    )
+                    self._task_traj = None
+                    return None
+
         t_start = time.perf_counter()
 
         # 构建 PlanningFrame
@@ -214,7 +219,11 @@ class PlanningSim:
     # ========== 任务处理 ==========
 
     def _handle_new_task(self, task: TaskToPlanning) -> None:
-        """收到新任务: B 样条平滑 → 构建参考线 → 重置决策状态"""
+        """收到新任务: 更新参考线 → 重置决策状态
+
+        2m 邻近校验推迟到 plan() 中执行，此时 FullStackEngine 已完成
+        坐标转换器初始化及车辆位置重置，ENU 坐标框架一致。
+        """
         task_traj = task.task_traj
         if not task_traj.points:
             return
@@ -223,6 +232,7 @@ class PlanningSim:
         self._ref_mgr.update_from_task(task_traj)
         self._action_seq = list(task.action_seq)
         self._decision.reset()
+        self._pending_validation = True
 
     def reset(self) -> None:
         """重置 Planning 状态"""
@@ -231,3 +241,4 @@ class PlanningSim:
         self._action_seq.clear()
         self._latest_move_authority = None
         self._latest_obstacles.clear()
+        self._pending_validation = False

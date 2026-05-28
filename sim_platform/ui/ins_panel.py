@@ -21,7 +21,6 @@ class InsPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self._ins_data = InsData()
         self._speed_collapsed = True
         self._attitude_collapsed = True
@@ -219,7 +218,7 @@ class InsPanel(QWidget):
         }
         color = colors.get(status, "#888888")
         self._gnss_status_label.setStyleSheet(
-            f"color: {color}; font-size: 12px; font-weight: bold;"
+            f"color: {color}; font-size: 13px; font-weight: bold;"
         )
 
     def set_ins_data(self, data: InsData):
@@ -253,12 +252,12 @@ class InsPanel(QWidget):
         self.setStyleSheet("""
             QGroupBox {
                 color: #b0b8d0;
-                font-size: 11px;
+                font-size: 13px;
                 font-weight: bold;
                 border: 1px solid #2a3a5c;
                 border-radius: 4px;
                 margin-top: 10px;
-                padding-top: 10px;
+                padding-top: 12px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -266,20 +265,20 @@ class InsPanel(QWidget):
                 padding: 0 3px;
             }
             QGroupBox::indicator {
-                width: 12px;
-                height: 12px;
+                width: 14px;
+                height: 14px;
             }
             QLabel {
                 color: #c8d0e0;
-                font-size: 11px;
+                font-size: 13px;
             }
             QDoubleSpinBox {
                 background: #1e2d44;
                 color: #e0e0e0;
                 border: 1px solid #2a3a5c;
                 border-radius: 3px;
-                padding: 3px 6px;
-                font-size: 12px;
+                padding: 4px 6px;
+                font-size: 13px;
                 min-width: 80px;
             }
             QDoubleSpinBox:disabled {

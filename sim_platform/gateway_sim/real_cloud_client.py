@@ -114,6 +114,16 @@ class RealCloudClient:
         self._map_download_status: str = ""  # ""=未开始, "downloading"=下载中, "success"=已下载, "failed"=下载失败
         self._map_download_path: str = ""    # 下载成功后的本地文件路径
 
+        # 任务下载状态
+        self._task_download_status: str = ""   # ""=未开始, "downloading"=下载中, "success"=已下载, "failed"=下载失败
+        self._task_download_url: str = ""      # 任务下载使用的完整 URL (含参数)
+        self._task_download_path: str = ""     # 下载成功后的本地文件路径
+        self._task_download_name: str = ""     # 任务文件名
+        self._task_md5: str = ""               # 任务文件 MD5
+
+        # 缓存: 服务器参数未就绪时收到的 DispatchTask (等 URL 就绪后重放)
+        self._pending_dispatch_proto = None
+
         # 消息统计
         self._stats_lock = threading.Lock()
         self._uplink_count: int = 0
@@ -227,8 +237,15 @@ class RealCloudClient:
         self._auth_success = False
         self._params_query_sent = False
         self._params_queried = False
+        self._download_base_url = ""
         self._map_download_status = ""
         self._map_download_path = ""
+        self._task_download_status = ""
+        self._task_download_url = ""
+        self._task_download_path = ""
+        self._task_download_name = ""
+        self._task_md5 = ""
+        self._pending_dispatch_proto = None
         self._stop_auth()
         logger.warning(f"[RealCloud] MQTT disconnected (rc={rc}), auto-reconnecting...")
 
@@ -289,31 +306,72 @@ class RealCloudClient:
 
     def _dispatch_cloud_msg(self, cloud_msg, topic: str):
         """根据 CloudMsg oneof 类型分发处理"""
-        from ..proto import cloudmsg_pb2
-
         msg_type = cloud_msg.WhichOneof("MsgUnion")
         if msg_type is None:
             return
 
-        logger.info(f"[RealCloud] Received: {msg_type} on {topic}")
+        logger.info(
+            f"[RealCloud] ↓ {msg_type} — "
+            f"timeStamps={cloud_msg.timeStamps}, flowId={cloud_msg.flowId}"
+        )
 
         if msg_type == "authenticationApply":
-            self._handle_auth_response(cloud_msg.authenticationApply)
+            aa = cloud_msg.authenticationApply
+            logger.info(
+                f"[RealCloud] AuthenticationApply: resultCode={aa.resultCode}, "
+                f"projectId={aa.projectId}"
+            )
+            self._handle_auth_response(aa)
 
         elif msg_type == "commonResult":
-            self._handle_common_result(cloud_msg.commonResult)
+            cr = cloud_msg.commonResult
+            logger.info(
+                f"[RealCloud] CommonResult: flowId={cr.flowId}, "
+                f"replyId={cr.replyId}, resultCode={cr.resultCode}"
+            )
+            self._handle_common_result(cr)
 
         elif msg_type == "serverParamsQueryResponse":
-            self._handle_server_params(cloud_msg.serverParamsQueryResponse)
+            rsp = cloud_msg.serverParamsQueryResponse
+            logger.info(
+                f"[RealCloud] ServerParamsQueryResponse: "
+                f"resultCode={rsp.resultCode}, "
+                f"map_file_name={rsp.map_file_name}, "
+                f"map_md5={rsp.map_md5}, "
+                f"download_base_url={rsp.download_base_url}"
+            )
+            self._handle_server_params(rsp)
 
         elif msg_type == "dispatchTask":
-            self._handle_dispatch_task(cloud_msg.dispatchTask)
+            dt = cloud_msg.dispatchTask
+            actions = []
+            for act in dt.command.actionSeq:
+                actions.append(
+                    f"({act.actionType}, lon={act.toPoint.longitude}, "
+                    f"lat={act.toPoint.latitude}, heading={act.toPoint.heading})"
+                )
+            logger.info(
+                f"[RealCloud] DispatchTask: "
+                f"taskSn={dt.taskSn}, dispatchResult={dt.dispatchResult}, "
+                f"failReason={dt.failReason}, command.path={dt.command.path}, "
+                f"command.fileMd5={dt.command.fileMd5}, "
+                f"actions=[{', '.join(actions)}]"
+            )
+            self._handle_dispatch_task(dt)
 
         elif msg_type == "movemntAuthoritySend":
             self._handle_move_authority(cloud_msg.movemntAuthoritySend)
 
         elif msg_type == "truckStatus":
-            self._handle_truck_status(cloud_msg.truckStatus)
+            ts = cloud_msg.truckStatus
+            logger.info(
+                f"[RealCloud] TruckStatus: taskStatus={ts.taskStatus}, "
+                f"loadState={ts.loadState}"
+            )
+            self._handle_truck_status(ts)
+
+        else:
+            logger.info(f"[RealCloud] ↓ {msg_type} (unhandled)")
 
     def _handle_auth_response(self, auth_apply):
         """处理鉴权应答"""
@@ -384,6 +442,13 @@ class RealCloudClient:
         if self._map_file_name and self._download_base_url:
             self._download_map_file()
 
+        # 重放缓存的 DispatchTask (保留消息在鉴权完成前到达)
+        if self._pending_dispatch_proto is not None:
+            logger.info("[RealCloud] Replaying cached DispatchTask")
+            cached = self._pending_dispatch_proto
+            self._pending_dispatch_proto = None
+            self._handle_dispatch_task(cached)
+
     def _download_map_file(self) -> None:
         """下载地图文件 (对应 C++ DealServerParamsQueryResponse 中 downloadFile(map_info))
 
@@ -411,32 +476,62 @@ class RealCloudClient:
     # ========== 下行 → SimMessageBus ==========
 
     def _handle_dispatch_task(self, dispatch_task_proto):
-        """收到 DispatchTask → 下载 tar.gz → 发布到 SimMessageBus"""
+        """收到 DispatchTask → 下载 tar.gz → 发布到 SimMessageBus
+
+        对应 C++ GateWay::DealDispatchTask (gateway.cc:619)
+        """
+        # 检查调度结果 (对应 C++ dispatchresult() != 0x01)
+        dispatch_result = dispatch_task_proto.dispatchResult
+        if dispatch_result != 1:
+            self._task_download_status = "failed"
+            logger.warning(
+                f"[RealCloud] DispatchTask rejected: dispatchResult={dispatch_result}, "
+                f"reason={dispatch_task_proto.failReason}"
+            )
+            return
+
         command = dispatch_task_proto.command
         task_sn = str(dispatch_task_proto.taskSn)
         file_name = command.path if command.path else ""
         file_md5 = command.fileMd5 if command.fileMd5 else ""
 
-        # 解析 actions
+        # 解析 actions (protobuf: Action{actionType, toPoint{longitude, latitude, heading}})
         actions = []
         for act in command.actionSeq:
+            tp = act.toPoint
             actions.append(Action(
                 action_type=act.actionType,
-                lon=act.lon,
-                lat=act.lat,
-                heading=act.heading,
+                lon=tp.longitude,
+                lat=tp.latitude,
+                heading=tp.heading,
             ))
 
-        logger.info(f"[RealCloud] DispatchTask: sn={task_sn}, file={file_name}")
+        self._task_download_name = file_name
+        self._task_md5 = file_md5
 
         # HTTP 下载并解压任务文件 → 获得本地路径
-        task_path = file_name
-        if file_name and self._download_base_url:
-            extracted = self._download_and_extract_task(file_name)
-            if extracted:
-                task_path = extracted
+        if not file_name:
+            self._task_download_status = "failed"
+            logger.warning("[RealCloud] DispatchTask skipped: command.path is empty")
+            return
+        if not self._download_base_url:
+            # 服务器参数尚未就绪 (保留消息在鉴权前到达)，缓存等 URL 就绪后重放
+            self._task_download_status = "pending"
+            self._pending_dispatch_proto = dispatch_task_proto
+            logger.info(
+                f"[RealCloud] DispatchTask cached (awaiting server params): "
+                f"sn={task_sn}, file={file_name}"
+            )
+            return
 
-        # 发布到 SimMessageBus（一次，携带最终可用的本地路径）
+        download_url = f"{self._download_base_url.rstrip('/')}?fileName={file_name}"
+        self._task_download_url = download_url
+        logger.info(f"[RealCloud] Task download URL: {download_url}")
+        task_path = self._download_and_extract_task(file_name)
+        if not task_path:
+            return
+
+        # 发布到 SimMessageBus（仅在下载和解压全部成功后）
         dispatch = SimDispatchTask(
             task_sn=task_sn,
             task_type=dispatch_task_proto.taskType,
@@ -445,7 +540,7 @@ class RealCloudClient:
             action_seq=actions,
             command_type=command.commandType,
             target_name=command.commandTargetName,
-            dispatch_result=dispatch_task_proto.dispatchResult,
+            dispatch_result=dispatch_result,
         )
         cd_task = CloudDispatchTask(
             msg_type="dispatch_task",
@@ -455,7 +550,11 @@ class RealCloudClient:
         self._bus.publish(CLOUD_DISPATCH_TASK, cd_task)
 
     def _download_and_extract_task(self, file_name: str) -> str:
-        """下载并解压任务文件 (.tar.gz)，返回解压后的目录路径；失败返回空字符串"""
+        """下载并解压任务文件 (.tar.gz)，返回解压后的目录路径；失败返回空字符串
+
+        对应 C++ DealDispatchTask → downloadFile + publicTaskToPnc (gateway.cc:635-652)
+        """
+        self._task_download_status = "downloading"
         os.makedirs(self._task_file_folder, exist_ok=True)
         dest = HttpDownloader.download_task_file(
             base_url=self._download_base_url,
@@ -464,9 +563,12 @@ class RealCloudClient:
             project_id=self._project_id,
         )
         if not dest:
+            self._task_download_status = "failed"
+            self._task_download_path = ""
             logger.error(f"[RealCloud] Task file download failed: {file_name}")
             return ""
 
+        self._task_download_path = dest
         extract_dir = os.path.join(
             self._task_file_folder,
             f"task_{os.path.splitext(os.path.splitext(file_name)[0])[0]}",
@@ -475,59 +577,175 @@ class RealCloudClient:
             os.makedirs(extract_dir, exist_ok=True)
             with tarfile.open(dest, "r:gz") as tar:
                 tar.extractall(extract_dir)
+            self._task_download_status = "success"
             logger.info(f"[RealCloud] Task extracted to: {extract_dir}")
             return extract_dir
         except Exception as e:
+            self._task_download_status = "failed"
             logger.error(f"[RealCloud] Extract failed: {e}")
             return ""
 
     def _handle_move_authority(self, ma_proto):
-        """收到 MovemntAuthoritySend → 发布到 SimMessageBus MOVE_AUTHORITY"""
-        stop_idx = 0
-        ep_lat, ep_lon, ep_heading = 0.0, 0.0, 0.0
+        """收到 MovemntAuthoritySend → 发布到 SimMessageBus MOVE_AUTHORITY
+
+        提取全部路权字段 (对应 C++ DealMovemntAuthoritySend + BussinessDecision):
+          - safeOccupied.startPoint / endPoint
+          - MovemntAuthor list (分段车道信息)
+          - lineSnQ (车道线序号序列)
+        """
+        # safeOccupied
+        safe = ma_proto.safeOccupied
+        start_pt = safe.startPoint
+        end_pt = safe.endPoint
+
+        # lineSnQ → 逗号分隔字符串
+        line_snq = ",".join(str(sn) for sn in safe.lineSnQ)
+
+        # MovemntAuthor list
+        segment_count = len(ma_proto.list)
+        last_lane_id = 0
+        last_point_index = 0
+        last_direction = 0.0
+        ep_lat, ep_lon = 0.0, 0.0
         if ma_proto.list:
             last = ma_proto.list[-1]
-            stop_idx = last.pointIndex
+            last_lane_id = last.laneId
+            last_point_index = last.pointIndex
+            last_direction = last.direction
             ep_lat = last.lat
             ep_lon = last.lon
-            ep_heading = last.direction
 
+        # stop_index 初始用 endPoint 的 index (后续由 BusinessDecision 在参考线上计算)
         ma = SimMoveAuthority(
-            right_of_way_index=stop_idx,
-            stop_index=stop_idx,
-            endpoint_lat=ep_lat,
-            endpoint_lon=ep_lon,
-            endpoint_heading=ep_heading,
+            endpoint_lat=end_pt.lat if end_pt.lat else ep_lat,
+            endpoint_lon=end_pt.lon if end_pt.lon else ep_lon,
+            end_point_index=end_pt.index,
+            end_point_line_sn=end_pt.lineSn,
+            start_point_lat=start_pt.lat,
+            start_point_lon=start_pt.lon,
+            start_point_index=start_pt.index,
+            start_point_line_sn=start_pt.lineSn,
+            right_of_way_index=last_point_index,
+            stop_index=last_point_index,
+            segment_count=segment_count,
+            last_lane_id=last_lane_id,
+            last_point_index=last_point_index,
+            last_direction=last_direction,
+            line_snq=line_snq,
             timestamp=time.time(),
         )
+        # 打印原始 SafeOccupied 数据
+        logger.info(
+            f"[RealCloud] SafeOccupied: "
+            f"startPoint=(lat={start_pt.lat:.6f}, lon={start_pt.lon:.6f}, "
+            f"idx={start_pt.index}, ln={start_pt.lineSn}), "
+            f"endPoint=(lat={end_pt.lat:.6f}, lon={end_pt.lon:.6f}, "
+            f"idx={end_pt.index}, ln={end_pt.lineSn}), "
+            f"lineSnQ={list(safe.lineSnQ)}"
+        )
+
+        # 打印原始 MovemntAuthor 列表
+        for i, item in enumerate(ma_proto.list):
+            logger.info(
+                f"[RealCloud] MovemntAuthor[{i}]: laneId={item.laneId}, "
+                f"pointIndex={item.pointIndex}, direction={item.direction:.2f}, "
+                f"lat={item.lat:.6f}, lon={item.lon:.6f}, "
+                f"pathFile={item.pathFileName}, digest={item.digest[:16] if item.digest else '—'}..."
+            )
+
         self._bus.publish(MOVE_AUTHORITY, ma)
-        logger.info(f"[RealCloud] MoveAuthority: stop_index={stop_idx}")
+        logger.info(
+            f"[RealCloud] MoveAuthority: segments={segment_count}, "
+            f"endPoint=({ma.endpoint_lat:.6f},{ma.endpoint_lon:.6f}), "
+            f"stop_index={last_point_index}"
+        )
 
     # ========== 上行: SimMessageBus → Protobuf → MQTT ==========
 
     def _on_uplink_device_msg(self, topic: str, msg: CloudDeviceMsg):
         """收到内部总线的上行消息 → 序列化为 Protobuf → MQTT 发布
 
-        对应 C++ sendVehiclePositionToCloud 等方法的 checkStatus() 守卫:
-        只有鉴权通过后才实际发送上行报告到 MQTT。
+        对应 C++ GateWay::checkStatus(): MQTT 已连接 + 已鉴权 + 已初始化(参数已获取)。
+        鉴权成功即发送上行报告。
         """
         if not self._auth_success:
+            logger.debug("[RealCloud] Uplink blocked: not authenticated")
             return
 
         from ..proto import ifmsg_pb2
 
         try:
             device_msg = ifmsg_pb2.DeviceMsg()
-            device_msg.timeStamps = int(msg.timestamp * 1000)
+            device_msg.timeStamps = int(time.time() * 1000)
 
             if msg.msg_type == "position_report":
                 self._fill_position_report(device_msg, msg.payload)
+                p = msg.payload
+                logger.debug(
+                    f"[RealCloud] ↑ position_report: "
+                    f"lon={p.get('longitude'):.8f} lat={p.get('latitude'):.8f} "
+                    f"alt={p.get('altitude'):.2f} heading={p.get('direction'):.2f}° "
+                    f"speed={p.get('speed'):.2f}km/h "
+                    f"battery={p.get('battery'):.1f}V/{p.get('batteryCapacity'):.0f} "
+                    f"matCode={p.get('materialCode')} "
+                    f"accel(fwd={p.get('forwardAcceleration'):.4f} "
+                    f"lat={p.get('lateralAcceleration'):.4f} "
+                    f"yaw={p.get('yawAngularAcceleration'):.2f}) "
+                    f"roadId={p.get('roadId')} ptIdx={p.get('pointIndex')} "
+                    f"roadDist={p.get('roadResidualDistance'):.2f} "
+                    f"opType={p.get('operationType')} reason={p.get('reasonCode')} "
+                    f"runState={p.get('runState')} stopReason=0x{p.get('stopReason',0):05X} "
+                    f"task(sn={p.get('taskSn')} type={p.get('taskType')} "
+                    f"status={p.get('taskStatus')}) "
+                    f"cmdType={p.get('commandType')} actType={p.get('actionType')} "
+                    f"actStatus={p.get('actionStatus')} "
+                    f"utcMs={p.get('utcMilliSeconds')} "
+                    f"path={p.get('currentPathName') or '-'} "
+                    f"area={p.get('curAreaBoundaryName') or '-'} "
+                    f"speedDev={p.get('speedDeviation'):.3f} "
+                    f"subState={p.get('subMachineState')} "
+                    f"detour={p.get('detourStatus')} agile={p.get('isAgileObstacle')} "
+                    f"autoExit={p.get('autoExitReasons')} "
+                    f"rssi={p.get('wirelessSignal')} "
+                    f"status(acc={device_msg.truckPositionReport.status.accState} "
+                    f"gps={device_msg.truckPositionReport.status.GPSState} "
+                    f"drivingMode={device_msg.truckPositionReport.status.drivingMode} "
+                    f"lock={device_msg.truckPositionReport.status.lockState} "
+                    f"brake={device_msg.truckPositionReport.status.brakeState} "
+                    f"gear={device_msg.truckPositionReport.status.vehicleGearState})"
+                )
             elif msg.msg_type == "monitor_report":
                 self._fill_monitor_report(device_msg, msg.payload)
+                p = msg.payload
+                logger.debug(
+                    f"[RealCloud] ↑ monitor_report: "
+                    f"speed={p.get('speed'):.1f}km/h lateralError={p.get('lateralError'):.3f} "
+                    f"throttleAuto={p.get('throttleOpenAuto'):.1f}% "
+                    f"brakeAuto={p.get('brakeOpenAuto'):.1f}% "
+                    f"spin={p.get('spin'):.0f}rpm limitSpeed={p.get('limitSpeed'):.1f}km/h"
+                )
             elif msg.msg_type == "state_report":
                 self._fill_state_report(device_msg, msg.payload)
+                p = msg.payload
+                logger.debug(
+                    f"[RealCloud] ↑ state_report: "
+                    f"mileage={p.get('mileage'):.1f}km "
+                    f"battery={p.get('batteryVoltage'):.1f}V "
+                    f"coolant={p.get('coolantTemperature'):.1f}°C "
+                    f"oil={p.get('oilPressure'):.1f}kPa "
+                    f"fuel={p.get('fuelLevel'):.1f}% "
+                    f"frontWheel={p.get('frontWheelDirection'):.1f}°"
+                )
             elif msg.msg_type == "stop_obstacle_info":
                 self._fill_stop_obstacle_info(device_msg, msg.payload)
+                p = msg.payload
+                logger.debug(
+                    f"[RealCloud] ↑ stop_obstacle_info: "
+                    f"ts={p.get('ts')} stopTs={p.get('stopTs')} "
+                    f"impactType={p.get('impactType')} "
+                    f"impactObstacle={len(p.get('impactObstacle',[]))} "
+                    f"otherObstacle={len(p.get('otherObstacle',[]))}"
+                )
             else:
                 return
 
@@ -596,7 +814,7 @@ class RealCloudClient:
         rpt.wirelessSignal = self._safe_int(payload.get("wirelessSignal", 80))
         rpt.status.accState = 1
         rpt.status.GPSState = 3
-        rpt.status.drivingMode = 2
+        rpt.status.drivingMode = 1  # 01=自动驾驶 (00=人工驾驶, 10=远程接管)
         rpt.status.lockState = 0
         rpt.status.brakeState = 0
         rpt.status.vehicleGearState = 3
@@ -703,6 +921,11 @@ class RealCloudClient:
                 "download_base_url": self._download_base_url,
                 "map_download_status": self._map_download_status,
                 "map_download_path": self._map_download_path,
+                "task_download_status": self._task_download_status,
+                "task_download_url": self._task_download_url,
+                "task_download_path": self._task_download_path,
+                "task_download_name": self._task_download_name,
+                "task_md5": self._task_md5,
                 "last_error": self._last_error,
             }
 
@@ -718,6 +941,11 @@ class RealCloudClient:
         self._params_queried = False
         self._map_download_status = ""
         self._map_download_path = ""
+        self._task_download_status = ""
+        self._task_download_url = ""
+        self._task_download_path = ""
+        self._task_download_name = ""
+        self._task_md5 = ""
         self._task_status = 0
         self._load_state = 0
         with self._stats_lock:

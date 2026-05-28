@@ -39,6 +39,34 @@ from ..models.sim_messages import (
 from .traj_parser import TrajParser
 from .reference_line_mgr import ReferenceLineManager, ReferenceLine
 
+# stopReason 20-bit 位图 (车云协议 Table[13])
+# Bit N = 0: 停车原因 N 生效中, Bit N = 1: 已恢复
+# 正常行驶 (无任何停车): 全部 20 bit 置 1 = 0xFFFFF
+STOP_REASON_ALL_CLEAR = 0xFFFFF  # 1048575
+
+STOP_REASON_BIT = {
+    "no_task": 0,          # 无任务停车
+    "fault": 1,            # 故障停车
+    "obstacle": 2,         # 遇障停车
+    "remote_safe": 3,      # 遥控手柄安全停车
+    "remote_emergency": 4, # 遥控手柄紧急停车
+    "platform_safe": 5,    # 平台安全停车
+    "platform_emergency": 6,  # 平台紧急停车
+    "excavator_safe": 7,   # 挖机安全停车
+    "excavator_emergency": 8,  # 挖机紧急停车
+    "cooling_row": 9,      # 凉车触发路权停止更新
+    "aeb": 10,             # AEB停车
+    "heartbeat_lost": 11,  # 故障心跳丢失停车
+    "remote_drive_safe": 12,   # 遥控驾驶安全停车
+    "remote_drive_emergency": 13,  # 遥控驾驶紧急停车
+    "row_end": 14,         # 路权终点停车
+    "hmi_safe": 15,        # HMI安全停车
+    "hmi_emergency": 16,   # HMI紧急停车
+    "no_row": 17,          # 无路权停车
+    "past_row_end": 18,    # 超过路权终点停车
+    "vcu_emergency": 19,   # VCU遥控器紧急停车
+}
+
 
 class GatewaySim:
     """车端 Gateway 仿真器
@@ -142,6 +170,7 @@ class GatewaySim:
                 task_traj = self._traj_parser.parse_file(str(file_path))
 
             if not task_traj.points:
+                logger.warning(f"[GatewaySim] Task file has no points: {file_path}")
                 return False
 
             self._ref_mgr.update_from_task(task_traj)
@@ -149,6 +178,8 @@ class GatewaySim:
             self._current_task_type = 1  # LOAD
             self._task_status = 1        # executing
 
+            logger.info(f"[GatewaySim] Task loaded: {len(task_traj.points)} points, "
+                        f"sn={self._current_task_sn}")
             self._publish_task_and_authority(task_traj)
             return True
 
@@ -172,18 +203,29 @@ class GatewaySim:
         if not file_path:
             return False
 
+        # 同任务号跳过 (retained 消息在 MQTT 重连后重复下发)
+        if dispatch_task.task_sn == self._current_task_sn and self._current_task_sn:
+            logger.info(f"[GatewaySim] Task sn={dispatch_task.task_sn} already loaded, skipping")
+            return True
+
         result = self.load_task_file(file_path)
         if result:
             self._current_task_sn = dispatch_task.task_sn
             self._current_task_type = dispatch_task.task_type
             self._action_seq = list(dispatch_task.action_seq)
+            # 重置上行上报计时器，避免 sim_time 归零后计时器不触发
+            self._last_position_report_time = 0.0
+            self._last_state_report_time = 0.0
         return result
 
     def _publish_task_and_authority(self, task_traj) -> None:
-        """发布 TaskToPlanning 和 MoveAuthority 到 SimMessageBus"""
+        """发布 TaskToPlanning 到 SimMessageBus
+
+        MoveAuthority 仅由云端下发 (RealCloudClient._handle_move_authority)，
+        不在本地任务加载时发布，与 C++ publicTaskToPnc 行为一致。
+        """
         now = time.time()
 
-        # TaskToPlanning
         t2p = TaskToPlanning(
             task_traj=task_traj,
             action_seq=list(self._action_seq),
@@ -193,19 +235,14 @@ class GatewaySim:
         )
         self._bus.publish(TASK_TO_PLANNING, t2p)
 
-        # MoveAuthority
-        ma = MoveAuthority(
-            right_of_way_index=self._ref_mgr.right_of_way_index,
-            stop_index=self._ref_mgr.stop_index,
-            timestamp=now,
-        )
-        self._bus.publish(MOVE_AUTHORITY, ma)
-
     # ========== SimMessageBus 回调 ==========
 
     def _on_cloud_dispatch_task(self, topic: str, msg: CloudDispatchTask) -> None:
         """收到云端下发的任务"""
         if msg.msg_type == "dispatch_task" and msg.dispatch_task is not None:
+            dt = msg.dispatch_task
+            logger.info(f"[GatewaySim] Cloud dispatch received: sn={dt.task_sn}, "
+                        f"path={dt.task_file_path}")
             self.load_task_from_dispatch(msg.dispatch_task)
         elif msg.msg_type == "move_authority" and msg.move_authority is not None:
             ma = msg.move_authority
@@ -236,11 +273,31 @@ class GatewaySim:
             self._publish_position_report(sim_time)
             self._publish_monitor_report(sim_time)
             self._last_position_report_time = sim_time
+            logger.debug(f"[GatewaySim] 1s uplink: position + monitor (t={sim_time:.1f})")
 
         # 10s 周期: TruckSateReport
         if sim_time - self._last_state_report_time >= 10.0:
             self._publish_state_report(sim_time)
             self._last_state_report_time = sim_time
+
+    def _compute_stop_reason(self) -> int:
+        """根据当前状态计算 stopReason 20-bit 位图
+
+        车云协议 Table[13]: 每 bit 对应一种停车原因
+          Bit = 0: 该停车原因生效中
+          Bit = 1: 已恢复 (正常行驶)
+
+        Returns:
+            20-bit 位图 (0x00000 ~ 0xFFFFF)
+        """
+        # 从全恢复开始 (正常行驶，无任何停车)
+        mask = STOP_REASON_ALL_CLEAR
+
+        # 无任务时: bit 0 置 0 (无任务停车生效)
+        if self._task_status != 1:
+            mask &= ~(1 << STOP_REASON_BIT["no_task"])
+
+        return mask
 
     def _publish_position_report(self, sim_time: float) -> None:
         """构造并发布 TruckPositionReport (34 字段，对应 C++ sendVehiclePositionToCloud)"""
@@ -268,14 +325,14 @@ class GatewaySim:
             "operationType": 1,
             "reasonCode": 0,
             "runState": 1 if self._task_status == 1 else 0,
-            "stopReason": 1,
+            "stopReason": self._compute_stop_reason(),
             "taskSn": self._current_task_sn,
             "taskType": self._current_task_type,
             "taskStatus": self._task_status,
             "commandType": 0,
             "actionType": 0,
             "actionStatus": 0,
-            "utcMilliSeconds": int(sim_time * 1000),
+            "utcMilliSeconds": int(time.time() * 1000),
             "currentPathName": "",
             "curAreaBoundaryName": "",
             "status": 0,
@@ -289,6 +346,10 @@ class GatewaySim:
         self._last_reason_code = payload["reasonCode"]
         self._last_run_state = payload["runState"]
         self._last_stop_reason = payload["stopReason"]
+
+        logger.debug(f"[GatewaySim] Position report: stopReason=0x{payload['stopReason']:05X} "
+                     f"({payload['stopReason']}), runState={payload['runState']}, "
+                     f"taskStatus={self._task_status}")
 
         msg = CloudDeviceMsg(
             msg_type="position_report",
@@ -390,8 +451,8 @@ class GatewaySim:
         lon2m = 111319.0 * cos_lat if cos_lat > 0 else 111319.0
 
         payload = {
-            "ts": int(sim_time * 1000),
-            "stopTs": int(sim_time * 1000),
+            "ts": int(time.time() * 1000),
+            "stopTs": int(time.time() * 1000),
             "impactType": impact_type,
             "currentPose": {
                 "lon": loc.lon,

@@ -68,8 +68,8 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self):
         self.setWindowTitle("电动宽体矿卡 — 仿真测试平台 v1.0")
-        self.resize(1400, 850)
-        self.setMinimumSize(1000, 600)
+        self.resize(1600, 950)
+        self.setMinimumSize(1100, 650)
 
         # 中央部件
         central = QWidget(self)
@@ -87,14 +87,14 @@ class MainWindow(QMainWindow):
 
         # QStackedWidget 管理不同模式的操作面板
         self._mode_stack = QStackedWidget(self)
-        self._mode_stack.setFixedWidth(290)
+        self._mode_stack.setFixedWidth(350)
         self._mode_stack.setStyleSheet(
             "QStackedWidget { background: #1a1a2e; }"
             "QStackedWidget > QWidget { background: #1a1a2e; }"
         )
 
         self.control_panel = ControlPanel(self)
-        self.control_panel.setFixedWidth(290)
+        self.control_panel.setFixedWidth(350)
         self.control_panel.set_min_turn_radius(self._params.min_turn_radius)
         self.control_panel.emergency_stop_triggered.connect(self._on_emergency_stop)
         self.control_panel.mode_changed.connect(self._on_mode_changed)
@@ -104,27 +104,26 @@ class MainWindow(QMainWindow):
         self._mode_stack.addWidget(self.control_panel)  # index 0: 基础模式
 
         self._full_stack_panel = FullStackPanel(self)
-        self._full_stack_panel.setFixedWidth(290)
-        self._full_stack_panel.task_load_requested.connect(self._on_full_stack_task_load)
+        self._full_stack_panel.setFixedWidth(350)
         self._mode_stack.addWidget(self._full_stack_panel)  # index 1: 全栈模式
 
         left_layout.addWidget(self._mode_stack)
 
         self.ins_panel = InsPanel(self)
-        self.ins_panel.setFixedWidth(290)
+        self.ins_panel.setFixedWidth(350)
         self.ins_panel.ins_data_applied.connect(self._on_ins_applied)
         self.ins_panel.ins_data_reset.connect(self._on_ins_reset)
         left_layout.addWidget(self.ins_panel)
 
         left_widget = QWidget(self)
         left_widget.setLayout(left_layout)
-        left_widget.setFixedWidth(290)
+        left_widget.setFixedWidth(350)
         self._left_widget = left_widget  # 保存引用，用于强制布局重算
 
         left_scroll = QScrollArea(self)
         left_scroll.setWidget(left_widget)
         left_scroll.setWidgetResizable(False)
-        left_scroll.setFixedWidth(306)
+        left_scroll.setFixedWidth(366)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         left_scroll.setStyleSheet("QScrollArea { border: none; background: #1a1a2e; }")
@@ -139,11 +138,11 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(4)
 
         self.status_panel = StatusPanel(self)
-        self.status_panel.setFixedWidth(290)
+        self.status_panel.setFixedWidth(350)
         right_layout.addWidget(self.status_panel)
 
         self._obstacle_panel = ObstaclePanel(self)
-        self._obstacle_panel.setFixedWidth(290)
+        self._obstacle_panel.setFixedWidth(350)
         self._obstacle_panel.obstacle_add_requested.connect(self._on_obstacle_add)
         self._obstacle_panel.obstacle_remove_requested.connect(self._on_obstacle_remove)
         self._obstacle_panel.obstacle_clear_all_requested.connect(self._on_obstacle_clear)
@@ -153,7 +152,7 @@ class MainWindow(QMainWindow):
 
         right_widget = QWidget(self)
         right_widget.setLayout(right_layout)
-        right_widget.setFixedWidth(290)
+        right_widget.setFixedWidth(350)
         self._right_widget = right_widget  # 保存引用，用于强制布局重算
 
         right_scroll = QScrollArea(self)
@@ -185,9 +184,9 @@ class MainWindow(QMainWindow):
             }
             QToolBar QToolButton {
                 color: #e0e8f0;
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: bold;
-                padding: 4px 10px;
+                padding: 5px 12px;
                 border-radius: 3px;
             }
             QToolBar QToolButton:hover {
@@ -198,6 +197,31 @@ class MainWindow(QMainWindow):
             }
             QToolBar QToolButton:disabled {
                 color: #555566;
+            }
+            QComboBox {
+                background: #16213e;
+                color: #e0e8f0;
+                border: 1px solid #2a3a5c;
+                border-radius: 2px;
+                padding: 2px 6px;
+            }
+            QComboBox QAbstractItemView {
+                background: #16213e;
+                color: #e0e8f0;
+                selection-background-color: #2a3a5c;
+                border: 1px solid #2a3a5c;
+            }
+            QComboBox::drop-down {
+                background: #1a2a44;
+                border: none;
+            }
+            QMenu {
+                background: #16213e;
+                color: #e0e8f0;
+                border: 1px solid #2a3a5c;
+            }
+            QMenu::item:selected {
+                background: #2a3a5c;
             }
         """)
 
@@ -285,10 +309,10 @@ class MainWindow(QMainWindow):
         self._status_mode = QLabel("● 已停止", self)
 
         # 设置醒目的字体颜色
-        style = "color: #00ff88; font-size: 12px; font-weight: bold; padding: 0 8px;"
+        style = "color: #00ff88; font-size: 13px; font-weight: bold; padding: 0 8px;"
         self._status_sim_time.setStyleSheet(style)
-        self._status_rtf.setStyleSheet("color: #ffcc00; font-size: 12px; font-weight: bold; padding: 0 8px;")
-        self._status_mode.setStyleSheet("color: #ff6666; font-size: 12px; font-weight: bold; padding: 0 8px;")
+        self._status_rtf.setStyleSheet("color: #ffcc00; font-size: 13px; font-weight: bold; padding: 0 8px;")
+        self._status_mode.setStyleSheet("color: #ff6666; font-size: 13px; font-weight: bold; padding: 0 8px;")
 
         self.status_bar.addWidget(self._status_sim_time)
         self.status_bar.addWidget(self._status_rtf)
@@ -336,7 +360,7 @@ class MainWindow(QMainWindow):
             self._action_stop.setEnabled(False)
             self._status_mode.setText("● 已停止")
             self._status_mode.setStyleSheet(
-                "color: #ff6666; font-size: 12px; font-weight: bold; padding: 0 8px;"
+                "color: #ff6666; font-size: 13px; font-weight: bold; padding: 0 8px;"
             )
             self._status_rtf.setText("RTF: —")
             self.ins_panel.set_editable(True)
@@ -349,7 +373,7 @@ class MainWindow(QMainWindow):
             self._action_stop.setEnabled(True)
             self._status_mode.setText("⏸ 已暂停")
             self._status_mode.setStyleSheet(
-                "color: #ffcc00; font-size: 12px; font-weight: bold; padding: 0 8px;"
+                "color: #ffcc00; font-size: 13px; font-weight: bold; padding: 0 8px;"
             )
             self.ins_panel.set_editable(True)
         else:
@@ -361,7 +385,7 @@ class MainWindow(QMainWindow):
             self._action_stop.setEnabled(True)
             self._status_mode.setText("▶ 运行中")
             self._status_mode.setStyleSheet(
-                "color: #00ff88; font-size: 12px; font-weight: bold; padding: 0 8px;"
+                "color: #00ff88; font-size: 13px; font-weight: bold; padding: 0 8px;"
             )
             self.ins_panel.set_editable(False)
 
@@ -449,6 +473,10 @@ class MainWindow(QMainWindow):
         """启动仿真（保持当前位姿，仅清除轨迹和时间）"""
         if self._sim_engine.running:
             return
+
+        # 新日志会话
+        from sim_platform.main import new_log_session
+        new_log_session()
 
         # 全栈模式: 启动时连接云端 (对应 C++ InitMqtt → InitAuthentication)
         if self._sim_mode == self.MODE_FULL_STACK and self._full_stack_engine is not None:
@@ -846,7 +874,7 @@ class MainWindow(QMainWindow):
             w.layout().invalidate()
             w.layout().activate()
             hint = w.sizeHint()
-            w.setFixedSize(260, hint.height())
+            w.setFixedSize(350, hint.height())
             w.update()
 
     def _relayout_left_panels(self):
@@ -859,7 +887,7 @@ class MainWindow(QMainWindow):
             w.layout().invalidate()
             w.layout().activate()
             hint = w.sizeHint()
-            w.setFixedSize(260, hint.height())
+            w.setFixedSize(350, hint.height())
             w.update()
 
     def _on_full_stack_state_updated(self, state: VehicleState):
@@ -871,9 +899,11 @@ class MainWindow(QMainWindow):
         trail_x, trail_y = engine.get_trail_points()
         self.map_view.update_state(state, trail_x, trail_y)
 
-        if engine.planning_traj:
-            xs = [p.x for p in engine.planning_traj.points]
-            ys = [p.y for p in engine.planning_traj.points]
+        # 始终显示完整参考线 (ref_mgr 持久保留所有点，不随车辆移动改变)
+        all_pts = engine.ref_mgr.get_all_points()
+        if all_pts:
+            xs = [p.x for p in all_pts]
+            ys = [p.y for p in all_pts]
             self.map_view.set_reference_trajectory(xs, ys)
 
         obstacles = engine.perception.get_all_obstacles()
@@ -923,6 +953,22 @@ class MainWindow(QMainWindow):
 
         self._refresh_cloud_display()
 
+        # 路权信息
+        self._full_stack_panel.set_move_authority(engine.latest_move_authority)
+
+        # 驾驶状态 (StatusType 上行字段)
+        cloud_stats = engine.cloud.get_stats()
+        self._full_stack_panel.set_vehicle_status({
+            "driving_mode": 1,
+            "acc_state": 1,
+            "gps_state": 3,
+            "gear": state.gear,
+            "brake": 1 if state.brake_pressure > 0 else 0,
+            "lock": 0,
+            "emergency_brake": 0,
+            "load_state": cloud_stats.get("load_state", 3),
+        })
+
         ctrl_status = "活跃" if engine.latest_control_cmd is not None else "空闲"
         ctrl_color = "#00ff88" if engine.latest_control_cmd is not None else "#b0c0d0"
         self._full_stack_panel.set_module_status("Control", ctrl_status, ctrl_color)
@@ -931,7 +977,7 @@ class MainWindow(QMainWindow):
         self._status_rtf.setText(f"RTF: {engine.real_time_factor:.2f}x")
         self._status_mode.setText("▶ 全栈运行中")
         self._status_mode.setStyleSheet(
-            "color: #00ff88; font-size: 12px; font-weight: bold; padding: 0 8px;"
+            "color: #00ff88; font-size: 13px; font-weight: bold; padding: 0 8px;"
         )
 
     def _refresh_cloud_display(self):
@@ -949,6 +995,7 @@ class MainWindow(QMainWindow):
             self._full_stack_panel.set_cloud_info({"state": "disconnected"})
             self._full_stack_panel.set_downlink_params({})
             self._full_stack_panel.set_uplink_fields({})
+            self._full_stack_panel.set_move_authority(None)
             return
 
         cloud_stats = engine.cloud.get_stats()
@@ -973,23 +1020,6 @@ class MainWindow(QMainWindow):
         # 上行发送字段 (停车原因等)
         uplink_stats = engine.gateway.get_uplink_stats()
         self._full_stack_panel.set_uplink_fields(uplink_stats)
-
-    def _on_full_stack_task_load(self, file_path: str):
-        """全栈模式加载 .traj 任务文件"""
-        if self._full_stack_engine is None:
-            return
-        success = self._full_stack_engine.load_task_and_start(file_path)
-        if success:
-            all_pts = self._full_stack_engine.ref_mgr.get_all_points()
-            if all_pts:
-                xs = [p.x for p in all_pts]
-                ys = [p.y for p in all_pts]
-                self.map_view.set_reference_trajectory(xs, ys)
-                if xs and ys:
-                    self.map_view.center_on(xs[0], ys[0])
-            self.status_bar.showMessage(f"任务已加载: {file_path}", 5000)
-        else:
-            QMessageBox.warning(self, "加载失败", f"无法加载任务文件:\n{file_path}")
 
     def _on_obstacle_add(self, x, y, length, width, heading, speed, obs_type):
         if self._full_stack_engine:
