@@ -15,7 +15,6 @@ class StatusPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setMinimumWidth(220)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self._value_labels: dict[str, QLabel] = {}

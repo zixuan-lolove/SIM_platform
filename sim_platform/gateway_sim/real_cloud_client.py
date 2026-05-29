@@ -257,6 +257,7 @@ class RealCloudClient:
             from ..proto import ifmsg_pb2
             cloud_msg = ifmsg_pb2.CloudMsg()
             cloud_msg.ParseFromString(msg.payload)
+            logger.info(f"[RealCloud] ↓ CloudMsg:\n{cloud_msg}")
             self._dispatch_cloud_msg(cloud_msg, msg.topic)
         except Exception as e:
             logger.error(f"[RealCloud] Failed to parse CloudMsg: {e}")
@@ -289,10 +290,10 @@ class RealCloudClient:
                 device_msg.authentication.authCode = self._imei
 
                 payload = device_msg.SerializeToString()
+                logger.info(f"[RealCloud] ↑ DeviceMsg (auth):\n{device_msg}")
                 self._mqtt.publish(self._topic_uplink, payload, qos=1)
                 with self._stats_lock:
                     self._uplink_count += 1
-                logger.debug(f"[RealCloud] Auth sent for IMEI={self._imei}")
             except Exception as e:
                 logger.error(f"[RealCloud] Auth send failed: {e}")
 
@@ -310,68 +311,18 @@ class RealCloudClient:
         if msg_type is None:
             return
 
-        logger.info(
-            f"[RealCloud] ↓ {msg_type} — "
-            f"timeStamps={cloud_msg.timeStamps}, flowId={cloud_msg.flowId}"
-        )
-
         if msg_type == "authenticationApply":
-            aa = cloud_msg.authenticationApply
-            logger.info(
-                f"[RealCloud] AuthenticationApply: resultCode={aa.resultCode}, "
-                f"projectId={aa.projectId}"
-            )
-            self._handle_auth_response(aa)
-
+            self._handle_auth_response(cloud_msg.authenticationApply)
         elif msg_type == "commonResult":
-            cr = cloud_msg.commonResult
-            logger.info(
-                f"[RealCloud] CommonResult: flowId={cr.flowId}, "
-                f"replyId={cr.replyId}, resultCode={cr.resultCode}"
-            )
-            self._handle_common_result(cr)
-
+            self._handle_common_result(cloud_msg.commonResult)
         elif msg_type == "serverParamsQueryResponse":
-            rsp = cloud_msg.serverParamsQueryResponse
-            logger.info(
-                f"[RealCloud] ServerParamsQueryResponse: "
-                f"resultCode={rsp.resultCode}, "
-                f"map_file_name={rsp.map_file_name}, "
-                f"map_md5={rsp.map_md5}, "
-                f"download_base_url={rsp.download_base_url}"
-            )
-            self._handle_server_params(rsp)
-
+            self._handle_server_params(cloud_msg.serverParamsQueryResponse)
         elif msg_type == "dispatchTask":
-            dt = cloud_msg.dispatchTask
-            actions = []
-            for act in dt.command.actionSeq:
-                actions.append(
-                    f"({act.actionType}, lon={act.toPoint.longitude}, "
-                    f"lat={act.toPoint.latitude}, heading={act.toPoint.heading})"
-                )
-            logger.info(
-                f"[RealCloud] DispatchTask: "
-                f"taskSn={dt.taskSn}, dispatchResult={dt.dispatchResult}, "
-                f"failReason={dt.failReason}, command.path={dt.command.path}, "
-                f"command.fileMd5={dt.command.fileMd5}, "
-                f"actions=[{', '.join(actions)}]"
-            )
-            self._handle_dispatch_task(dt)
-
+            self._handle_dispatch_task(cloud_msg.dispatchTask)
         elif msg_type == "movemntAuthoritySend":
             self._handle_move_authority(cloud_msg.movemntAuthoritySend)
-
         elif msg_type == "truckStatus":
-            ts = cloud_msg.truckStatus
-            logger.info(
-                f"[RealCloud] TruckStatus: taskStatus={ts.taskStatus}, "
-                f"loadState={ts.loadState}"
-            )
-            self._handle_truck_status(ts)
-
-        else:
-            logger.info(f"[RealCloud] ↓ {msg_type} (unhandled)")
+            self._handle_truck_status(cloud_msg.truckStatus)
 
     def _handle_auth_response(self, auth_apply):
         """处理鉴权应答"""
@@ -406,6 +357,8 @@ class RealCloudClient:
             f"[RealCloud] TruckStatus: taskStatus={self._task_status}, "
             f"loadState={self._load_state}"
         )
+        # 每次收到云端状态时检查是否有失败的下载需要重试
+        self._retry_failed_downloads()
 
     def _query_server_params(self):
         """发送服务器参数查询"""
@@ -414,7 +367,9 @@ class RealCloudClient:
             device_msg = ifmsg_pb2.DeviceMsg()
             device_msg.timeStamps = int(time.time() * 1000)
             device_msg.serverParamsQuery.SetInParent()
-            self._mqtt.publish(self._topic_uplink, device_msg.SerializeToString(), qos=1)
+            payload = device_msg.SerializeToString()
+            logger.info(f"[RealCloud] ↑ DeviceMsg (params_query):\n{device_msg}")
+            self._mqtt.publish(self._topic_uplink, payload, qos=1)
             with self._stats_lock:
                 self._uplink_count += 1
             self._params_query_sent = True
@@ -448,6 +403,61 @@ class RealCloudClient:
             cached = self._pending_dispatch_proto
             self._pending_dispatch_proto = None
             self._handle_dispatch_task(cached)
+
+    def _retry_failed_downloads(self) -> None:
+        """周期重试失败的下载 (地图 / 任务)
+
+        云端可能在仿真启动后才上传文件，首次请求 404 不代表文件永远不可用。
+        每次收到 TruckStatus 时触发重试，间隔由云端下发频率决定 (~2s)。
+        """
+        import os
+        now = time.time()
+
+        # ── 地图下载重试 ──
+        if self._map_download_status == "failed" and self._map_file_name and self._download_base_url:
+            if not getattr(self, '_last_map_retry_time', 0) or now - self._last_map_retry_time >= 30:
+                self._last_map_retry_time = now
+                logger.info(f"[RealCloud] Retrying map download: {self._map_file_name}")
+                self._download_map_file()
+                # 地图下载成功后，若之前任务因 URL 未就绪而缓存，立即重放
+                if self._map_download_status == "success" and self._pending_dispatch_proto is not None:
+                    logger.info("[RealCloud] Replaying cached DispatchTask after map download success")
+                    cached = self._pending_dispatch_proto
+                    self._pending_dispatch_proto = None
+                    self._handle_dispatch_task(cached)
+
+        # ── 任务下载重试 ──
+        if self._task_download_status == "failed" and self._task_download_name and self._download_base_url:
+            if not getattr(self, '_last_task_retry_time', 0) or now - self._last_task_retry_time >= 30:
+                self._last_task_retry_time = now
+                logger.info(f"[RealCloud] Retrying task download: {self._task_download_name}")
+                self._download_and_retry_task()
+
+    def _download_and_retry_task(self) -> None:
+        """重试下载任务文件，成功后发布到 SimMessageBus"""
+        if not self._task_download_name:
+            return
+        task_path = self._download_and_extract_task(self._task_download_name)
+        if not task_path:
+            return
+
+        # 重新构造 DispatchTask 并发布
+        dispatch = SimDispatchTask(
+            task_sn=self._pending_task_sn if hasattr(self, '_pending_task_sn') else "",
+            task_type=self._pending_task_type if hasattr(self, '_pending_task_type') else 0,
+            task_file_path=task_path,
+            file_md5=getattr(self, '_pending_task_md5', ""),
+            action_seq=list(getattr(self, '_pending_action_seq', [])),
+            command_type=getattr(self, '_pending_command_type', 0),
+            target_name=getattr(self, '_pending_target_name', ""),
+            dispatch_result=getattr(self, '_pending_dispatch_result', 1),
+        )
+        cd_task = CloudDispatchTask(
+            msg_type="dispatch_task",
+            dispatch_task=dispatch,
+            timestamp=time.time(),
+        )
+        self._bus.publish(CLOUD_DISPATCH_TASK, cd_task)
 
     def _download_map_file(self) -> None:
         """下载地图文件 (对应 C++ DealServerParamsQueryResponse 中 downloadFile(map_info))
@@ -508,6 +518,15 @@ class RealCloudClient:
 
         self._task_download_name = file_name
         self._task_md5 = file_md5
+
+        # 缓存任务信息以便下载失败后重试
+        self._pending_task_sn = task_sn
+        self._pending_task_type = dispatch_task_proto.taskType
+        self._pending_task_md5 = file_md5
+        self._pending_action_seq = actions
+        self._pending_command_type = command.commandType
+        self._pending_target_name = command.commandTargetName
+        self._pending_dispatch_result = dispatch_result
 
         # HTTP 下载并解压任务文件 → 获得本地路径
         if not file_name:
@@ -634,31 +653,7 @@ class RealCloudClient:
             line_snq=line_snq,
             timestamp=time.time(),
         )
-        # 打印原始 SafeOccupied 数据
-        logger.info(
-            f"[RealCloud] SafeOccupied: "
-            f"startPoint=(lat={start_pt.lat:.6f}, lon={start_pt.lon:.6f}, "
-            f"idx={start_pt.index}, ln={start_pt.lineSn}), "
-            f"endPoint=(lat={end_pt.lat:.6f}, lon={end_pt.lon:.6f}, "
-            f"idx={end_pt.index}, ln={end_pt.lineSn}), "
-            f"lineSnQ={list(safe.lineSnQ)}"
-        )
-
-        # 打印原始 MovemntAuthor 列表
-        for i, item in enumerate(ma_proto.list):
-            logger.info(
-                f"[RealCloud] MovemntAuthor[{i}]: laneId={item.laneId}, "
-                f"pointIndex={item.pointIndex}, direction={item.direction:.2f}, "
-                f"lat={item.lat:.6f}, lon={item.lon:.6f}, "
-                f"pathFile={item.pathFileName}, digest={item.digest[:16] if item.digest else '—'}..."
-            )
-
         self._bus.publish(MOVE_AUTHORITY, ma)
-        logger.info(
-            f"[RealCloud] MoveAuthority: segments={segment_count}, "
-            f"endPoint=({ma.endpoint_lat:.6f},{ma.endpoint_lon:.6f}), "
-            f"stop_index={last_point_index}"
-        )
 
     # ========== 上行: SimMessageBus → Protobuf → MQTT ==========
 
@@ -680,75 +675,16 @@ class RealCloudClient:
 
             if msg.msg_type == "position_report":
                 self._fill_position_report(device_msg, msg.payload)
-                p = msg.payload
-                logger.debug(
-                    f"[RealCloud] ↑ position_report: "
-                    f"lon={p.get('longitude'):.8f} lat={p.get('latitude'):.8f} "
-                    f"alt={p.get('altitude'):.2f} heading={p.get('direction'):.2f}° "
-                    f"speed={p.get('speed'):.2f}km/h "
-                    f"battery={p.get('battery'):.1f}V/{p.get('batteryCapacity'):.0f} "
-                    f"matCode={p.get('materialCode')} "
-                    f"accel(fwd={p.get('forwardAcceleration'):.4f} "
-                    f"lat={p.get('lateralAcceleration'):.4f} "
-                    f"yaw={p.get('yawAngularAcceleration'):.2f}) "
-                    f"roadId={p.get('roadId')} ptIdx={p.get('pointIndex')} "
-                    f"roadDist={p.get('roadResidualDistance'):.2f} "
-                    f"opType={p.get('operationType')} reason={p.get('reasonCode')} "
-                    f"runState={p.get('runState')} stopReason=0x{p.get('stopReason',0):05X} "
-                    f"task(sn={p.get('taskSn')} type={p.get('taskType')} "
-                    f"status={p.get('taskStatus')}) "
-                    f"cmdType={p.get('commandType')} actType={p.get('actionType')} "
-                    f"actStatus={p.get('actionStatus')} "
-                    f"utcMs={p.get('utcMilliSeconds')} "
-                    f"path={p.get('currentPathName') or '-'} "
-                    f"area={p.get('curAreaBoundaryName') or '-'} "
-                    f"speedDev={p.get('speedDeviation'):.3f} "
-                    f"subState={p.get('subMachineState')} "
-                    f"detour={p.get('detourStatus')} agile={p.get('isAgileObstacle')} "
-                    f"autoExit={p.get('autoExitReasons')} "
-                    f"rssi={p.get('wirelessSignal')} "
-                    f"status(acc={device_msg.truckPositionReport.status.accState} "
-                    f"gps={device_msg.truckPositionReport.status.GPSState} "
-                    f"drivingMode={device_msg.truckPositionReport.status.drivingMode} "
-                    f"lock={device_msg.truckPositionReport.status.lockState} "
-                    f"brake={device_msg.truckPositionReport.status.brakeState} "
-                    f"gear={device_msg.truckPositionReport.status.vehicleGearState})"
-                )
             elif msg.msg_type == "monitor_report":
                 self._fill_monitor_report(device_msg, msg.payload)
-                p = msg.payload
-                logger.debug(
-                    f"[RealCloud] ↑ monitor_report: "
-                    f"speed={p.get('speed'):.1f}km/h lateralError={p.get('lateralError'):.3f} "
-                    f"throttleAuto={p.get('throttleOpenAuto'):.1f}% "
-                    f"brakeAuto={p.get('brakeOpenAuto'):.1f}% "
-                    f"spin={p.get('spin'):.0f}rpm limitSpeed={p.get('limitSpeed'):.1f}km/h"
-                )
             elif msg.msg_type == "state_report":
                 self._fill_state_report(device_msg, msg.payload)
-                p = msg.payload
-                logger.debug(
-                    f"[RealCloud] ↑ state_report: "
-                    f"mileage={p.get('mileage'):.1f}km "
-                    f"battery={p.get('batteryVoltage'):.1f}V "
-                    f"coolant={p.get('coolantTemperature'):.1f}°C "
-                    f"oil={p.get('oilPressure'):.1f}kPa "
-                    f"fuel={p.get('fuelLevel'):.1f}% "
-                    f"frontWheel={p.get('frontWheelDirection'):.1f}°"
-                )
             elif msg.msg_type == "stop_obstacle_info":
                 self._fill_stop_obstacle_info(device_msg, msg.payload)
-                p = msg.payload
-                logger.debug(
-                    f"[RealCloud] ↑ stop_obstacle_info: "
-                    f"ts={p.get('ts')} stopTs={p.get('stopTs')} "
-                    f"impactType={p.get('impactType')} "
-                    f"impactObstacle={len(p.get('impactObstacle',[]))} "
-                    f"otherObstacle={len(p.get('otherObstacle',[]))}"
-                )
             else:
                 return
 
+            logger.info(f"[RealCloud] ↑ DeviceMsg ({msg.msg_type}):\n{device_msg}")
             payload = device_msg.SerializeToString()
             self._mqtt.publish(self._topic_uplink, payload, qos=1)
             with self._stats_lock:

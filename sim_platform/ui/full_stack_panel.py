@@ -93,7 +93,9 @@ class FullStackPanel(QWidget):
         for key, text in downlink_fields:
             lbl = QLabel(text)
             lbl.setStyleSheet(self._label_style())
-            lbl.setWordWrap(True)
+            lbl.setWordWrap(False)
+            lbl.setMinimumHeight(18)
+            lbl.setMaximumHeight(22)
             downlink_layout.addWidget(lbl)
             self._downlink_labels[key] = lbl
 
@@ -369,6 +371,14 @@ class FullStackPanel(QWidget):
                 _step_pending("消息: —")
             )
 
+    @staticmethod
+    def _elide(text: str, max_len: int = 44) -> str:
+        """超长文本中间截断，保留首尾"""
+        if len(text) <= max_len:
+            return text
+        half = (max_len - 5) // 2
+        return text[:half] + "..." + text[-half:]
+
     def set_downlink_params(self, stats: dict):
         """更新下行参数显示 (云端下发的服务器参数 + 任务下载)"""
         map_file = stats.get("map_file", "")
@@ -384,18 +394,26 @@ class FullStackPanel(QWidget):
             "failed": '<span style="color:#ff4444;">下载失败</span>',
         }.get(download_status, download_status)
 
+        # 地图参数 (超长文本截断，完整内容在 tooltip)
+        map_display = self._elide(map_file) if map_file else "—"
         self._downlink_labels["param_file"].setText(
-            f'地图文件: {map_file if map_file else "—"}  {status_text}'
+            f'地图文件: {map_display}  {status_text}'
         )
+        if map_file:
+            self._downlink_labels["param_file"].setToolTip(map_file)
+
         self._downlink_labels["param_md5"].setText(
             f'文件 MD5: {map_md5 if map_md5 else "—"}'
         )
-        self._downlink_labels["param_url"].setText(
-            f'下载 URL: {download_url if download_url else "—"}'
-        )
-        self._downlink_labels["param_local"].setText(
-            f'本地路径: {local_path if local_path else "—"}'
-        )
+        url_display = self._elide(download_url) if download_url else "—"
+        self._downlink_labels["param_url"].setText(f'下载 URL: {url_display}')
+        if download_url:
+            self._downlink_labels["param_url"].setToolTip(download_url)
+
+        local_display = self._elide(local_path) if local_path else "—"
+        self._downlink_labels["param_local"].setText(f'本地路径: {local_display}')
+        if local_path:
+            self._downlink_labels["param_local"].setToolTip(local_path)
 
         # 任务文件下载
         task_dl_status = stats.get("task_download_status", "")
@@ -410,15 +428,20 @@ class FullStackPanel(QWidget):
             "failed": '<span style="color:#ff4444;">下载失败</span>',
         }.get(task_dl_status, task_dl_status)
 
-        task_name_display = task_dl_name if task_dl_name else "—"
+        task_display = self._elide(task_dl_name) if task_dl_name else "—"
         self._downlink_labels["task_file"].setText(
-            f'任务文件: {task_name_display}  {task_status_text}'
+            f'任务文件: {task_display}  {task_status_text}'
         )
+        if task_dl_name:
+            self._downlink_labels["task_file"].setToolTip(task_dl_name)
+
+        url_display = self._elide(task_dl_url) if task_dl_url else "—"
+        self._downlink_labels["task_url"].setText(f'任务 URL: {url_display}')
+        if task_dl_url:
+            self._downlink_labels["task_url"].setToolTip(task_dl_url)
+
         self._downlink_labels["task_md5"].setText(
             f'任务 MD5: {task_md5 if task_md5 else "—"}'
-        )
-        self._downlink_labels["task_url"].setText(
-            f'任务 URL: {task_dl_url if task_dl_url else "—"}'
         )
 
     def set_uplink_fields(self, stats: dict):

@@ -15,6 +15,17 @@ view:
   grid_color: "rgba(255,255,255,0.08)"
   background_color: "#1a1a2e"
 
+# 惯导初始数据 (启动时加载到 INS 面板，可手动修改)
+ins:
+  lat: 32.0547772361585          # 纬度 (WGS84)
+  lon: 118.41260410461283         # 经度 (WGS84)
+  alt: 84.0                  # 海拔 (m)
+  heading: 40          # 地理航向角 (deg, 0=北, 顺时针)
+  vel_east: 0.0             # 东向速度 (m/s)
+  vel_north: 0.0            # 北向速度 (m/s)
+  roll: 0.0                 # 横滚角 (deg)
+  pitch: 0.0                # 俯仰角 (deg)
+
 # 初始车辆状态
 initial_state:
   x: 0.0

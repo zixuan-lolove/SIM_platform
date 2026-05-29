@@ -72,7 +72,11 @@ class HttpDownloader:
             下载后的完整文件路径，失败返回空字符串
         """
         import os
-        url = f"{base_url.rstrip('/')}?fileName={file_name}"
+        from urllib.parse import urlparse
+        # 从 base_url 提取 host:port，拼接新路径 /hdmap/terminal/download/file/{fileName}
+        parsed = urlparse(base_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        url = f"{base}/hdmap/terminal/download/file/{file_name}"
         dest_path = os.path.join(dest_dir, file_name)
         os.makedirs(dest_dir, exist_ok=True)
         if HttpDownloader.download(url, dest_path, project_id):

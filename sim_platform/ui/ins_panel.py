@@ -44,18 +44,18 @@ class InsPanel(QWidget):
         pose_grid.setSpacing(4)
 
         pose_fields = [
-            ("纬度 Lat", "lat", -90.0, 90.0, 0.0, "°"),
-            ("经度 Lon", "lon", -180.0, 180.0, 0.0, "°"),
-            ("海拔 Alt", "alt", -500.0, 9000.0, 0.0, "m"),
-            ("地理航向 Heading", "heading", 0.0, 360.0, 0.0, "°"),
+            ("纬度 Lat", "lat", -90.0, 90.0, 0.0, "°", 14),
+            ("经度 Lon", "lon", -180.0, 180.0, 0.0, "°", 14),
+            ("海拔 Alt", "alt", -500.0, 9000.0, 0.0, "m", 6),
+            ("地理航向 Heading", "heading", 0.0, 360.0, 0.0, "°", 8),
         ]
         self._pose_inputs: dict[str, QDoubleSpinBox] = {}
-        for row, (name, key, vmin, vmax, default, unit) in enumerate(pose_fields):
+        for row, (name, key, vmin, vmax, default, unit, decimals) in enumerate(pose_fields):
             lbl = QLabel(name, self)
             spin = QDoubleSpinBox(self)
             spin.setRange(vmin, vmax)
             spin.setValue(default)
-            spin.setDecimals(20)
+            spin.setDecimals(decimals)
             spin.setSingleStep(1.0 if unit == "m" else 1.0)
             spin.setKeyboardTracking(False)
             unit_lbl = QLabel(unit, self)
@@ -84,7 +84,7 @@ class InsPanel(QWidget):
             spin = QDoubleSpinBox(self)
             spin.setRange(vmin, vmax)
             spin.setValue(default)
-            spin.setDecimals(2)
+            spin.setDecimals(3)
             spin.setSingleStep(0.5)
             unit_lbl = QLabel(unit, self)
             speed_grid.addWidget(lbl, row, 0)
@@ -117,7 +117,7 @@ class InsPanel(QWidget):
             spin = QDoubleSpinBox(self)
             spin.setRange(vmin, vmax)
             spin.setValue(default)
-            spin.setDecimals(2)
+            spin.setDecimals(4)
             spin.setSingleStep(1.0)
             unit_lbl = QLabel(unit, self)
             attitude_grid.addWidget(lbl, row, 0)
@@ -236,6 +236,40 @@ class InsPanel(QWidget):
 
     def get_ins_data(self) -> InsData:
         return self._ins_data.clone()
+
+    def load_from_config(self, config_path: str) -> None:
+        """从 YAML 配置文件加载 INS 初始值
+
+        配置文件格式 (sim_config.yaml):
+          ins:
+            lat: 32.05706660
+            lon: 118.41504770
+            alt: 0.0
+            heading: 41.6278
+            vel_east: 0.0
+            vel_north: 0.0
+            roll: 0.0
+            pitch: 0.0
+        """
+        import yaml, os
+        if not os.path.exists(config_path):
+            return
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+            ins = cfg.get("ins", {})
+            if not ins:
+                return
+            self._pose_inputs["lat"].setValue(float(ins.get("lat", 0.0)))
+            self._pose_inputs["lon"].setValue(float(ins.get("lon", 0.0)))
+            self._pose_inputs["alt"].setValue(float(ins.get("alt", 0.0)))
+            self._pose_inputs["heading"].setValue(float(ins.get("heading", 0.0)))
+            self._speed_inputs["vx"].setValue(float(ins.get("vel_east", 0.0)))
+            self._speed_inputs["vy"].setValue(float(ins.get("vel_north", 0.0)))
+            self._attitude_inputs["roll"].setValue(float(ins.get("roll", 0.0)))
+            self._attitude_inputs["pitch"].setValue(float(ins.get("pitch", 0.0)))
+        except Exception:
+            pass  # 配置文件读取失败不阻塞启动
 
     def set_editable(self, editable: bool):
         """控制面板是否可编辑（运行中锁定）"""

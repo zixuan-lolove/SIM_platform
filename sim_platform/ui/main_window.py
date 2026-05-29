@@ -115,6 +115,12 @@ class MainWindow(QMainWindow):
         self.ins_panel.ins_data_reset.connect(self._on_ins_reset)
         left_layout.addWidget(self.ins_panel)
 
+        # 从配置文件加载 INS 初始值
+        import os
+        config_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
+        ins_config = os.path.join(config_dir, "sim_config.yaml")
+        self.ins_panel.load_from_config(ins_config)
+
         left_widget = QWidget(self)
         left_widget.setLayout(left_layout)
         left_widget.setFixedWidth(350)
@@ -153,12 +159,12 @@ class MainWindow(QMainWindow):
         right_widget = QWidget(self)
         right_widget.setLayout(right_layout)
         right_widget.setFixedWidth(350)
-        self._right_widget = right_widget  # 保存引用，用于强制布局重算
+        self._right_widget = right_widget
 
         right_scroll = QScrollArea(self)
         right_scroll.setWidget(right_widget)
         right_scroll.setWidgetResizable(False)
-        right_scroll.setFixedWidth(306)
+        right_scroll.setFixedWidth(366)
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         right_scroll.setStyleSheet("QScrollArea { border: none; background: #1a1a2e; }")
