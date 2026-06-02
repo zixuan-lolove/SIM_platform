@@ -55,6 +55,8 @@ class PlanningFrame:
         self.stop: bool = False
         self.lift_cmd: int = 0
         self.is_over_time: bool = False
+        self.action_type: int = 0      # 当前执行的 action 类型 (1=STOP,2=LOAD,3=DUMP,4=LIFT)
+        self.action_status: int = 0    # 0=idle, 1=executing, 2=complete
 
         # 传感器时间戳 (用于超时检测)
         self.last_localization_time: float = 0.0
@@ -148,8 +150,14 @@ class PlanningSim:
             PlanningResult (已发布到 SimMessageBus)，无任务/无定位时返回 None
         """
         if not self.has_task:
+            if not hasattr(self, '_no_task_logged'):
+                self._no_task_logged = True
+                logger.warning("[PlanningSim] plan() aborted: has_task=False")
             return None
         if self._latest_localization is None:
+            if not hasattr(self, '_no_loc_logged'):
+                self._no_loc_logged = True
+                logger.warning("[PlanningSim] plan() aborted: no localization yet")
             return None
 
         # 新任务 2m 邻近校验 — 推迟到 plan() 而非在 _handle_new_task 中执行，
@@ -163,13 +171,18 @@ class PlanningSim:
                 min_dis_sq = min(
                     (p.x - loc.x) ** 2 + (p.y - loc.y) ** 2 for p in all_pts
                 )
-                if min_dis_sq ** 0.5 > 2.0:
+                min_dist = min_dis_sq ** 0.5
+                if min_dist > 2.0:
                     logger.warning(
                         f"[PlanningSim] Task rejected: vehicle too far from trajectory "
-                        f"(dist={min_dis_sq ** 0.5:.1f}m > 2m)"
+                        f"(dist={min_dist:.1f}m > 2m)"
                     )
                     self._task_traj = None
                     return None
+                else:
+                    logger.info(f"[PlanningSim] Proximity check PASSED: "
+                                f"min_dist={min_dist:.2f}m, n_pts={len(all_pts)}, "
+                                f"vehicle=({loc.x:.2f},{loc.y:.2f})")
 
         t_start = time.perf_counter()
 
@@ -210,10 +223,12 @@ class PlanningSim:
             stop=frame.stop,
             planner_type="rtk",
             planning_time_ms=elapsed_ms,
+            action_type=frame.action_type,
+            action_status=frame.action_status,
             timestamp=sim_time,
         )
 
-        self._bus.publish(PLANNING_RESULT, result)
+        self._bus.publish(PLANNING_RESULT, result, publisher="PlanningSim")
         return result
 
     # ========== 任务处理 ==========
@@ -233,6 +248,9 @@ class PlanningSim:
         self._action_seq = list(task.action_seq)
         self._decision.reset()
         self._pending_validation = True
+        logger.info(f"[PlanningSim] New task: {len(task_traj.points)} pts, "
+                    f"actions={len(self._action_seq)}, "
+                    f"types={[a.action_type for a in self._action_seq]}")
 
     def reset(self) -> None:
         """重置 Planning 状态"""

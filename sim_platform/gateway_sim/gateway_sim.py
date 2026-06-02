@@ -20,6 +20,7 @@ from ..core.sim_message_bus import (
     CLOUD_DISPATCH_TASK,
     TASK_TO_PLANNING,
     MOVE_AUTHORITY,
+    PLANNING_RESULT,
     LOCALIZATION,
     CHASSIS,
     CONTROL_CMD,
@@ -28,6 +29,7 @@ from ..core.sim_message_bus import (
 from ..models.sim_messages import (
     TaskToPlanning,
     MoveAuthority,
+    PlanningResult,
     Localization,
     Chassis,
     ControlCmd,
@@ -38,6 +40,7 @@ from ..models.sim_messages import (
 )
 from .traj_parser import TrajParser
 from .reference_line_mgr import ReferenceLineManager, ReferenceLine
+from .hdmap_matcher import HdMapMatcher
 
 # stopReason 20-bit 位图 (车云协议 Table[13])
 # Bit N = 0: 停车原因 N 生效中, Bit N = 1: 已恢复
@@ -82,14 +85,18 @@ class GatewaySim:
       - CloudDeviceMsg       → 上行状态报告给 CloudCommSim
     """
 
-    def __init__(self, bus: SimMessageBus):
+    def __init__(self, bus: SimMessageBus, map_folder: str = ""):
         self._bus = bus
         self._traj_parser = TrajParser()
         self._ref_mgr = ReferenceLineManager()
 
+        # 高精地图匹配器 (用于上行报告中查找当前所在车道 ID)
+        self._map_matcher = HdMapMatcher(map_folder) if map_folder else None
+
         # 当前任务信息
         self._current_task_sn: str = ""
         self._current_task_type: int = 0
+        self._command_type: int = 0       # 从下发任务转发的 Command.commandType
         self._task_status: int = 0       # 0=idle, 1=executing, 2=complete
         self._action_seq: list[Action] = []
 
@@ -97,6 +104,11 @@ class GatewaySim:
         self._latest_localization: Optional[Localization] = None
         self._latest_chassis: Optional[Chassis] = None
         self._latest_control_cmd: Optional[ControlCmd] = None
+        self._latest_planning_result: Optional[PlanningResult] = None
+
+        # action 完成 latch: 确保 status=2 至少被一次位置上报捕获
+        self._pending_action_completed: bool = False
+        self._completed_action_type: int = 0
 
         # 上行上报节流
         self._last_position_report_time: float = 0.0
@@ -109,6 +121,7 @@ class GatewaySim:
 
         # 订阅
         self._bus.subscribe(CLOUD_DISPATCH_TASK, self._on_cloud_dispatch_task)
+        self._bus.subscribe(PLANNING_RESULT, self._on_planning_result)
         self._bus.subscribe(LOCALIZATION, self._on_localization)
         self._bus.subscribe(CHASSIS, self._on_chassis)
         self._bus.subscribe(CONTROL_CMD, self._on_control_cmd)
@@ -177,6 +190,9 @@ class GatewaySim:
             self._current_task_sn = task_traj.task_id or str(file_path)
             self._current_task_type = 1  # LOAD
             self._task_status = 1        # executing
+            # 新任务开始：清除上次 action 完成 latch
+            self._pending_action_completed = False
+            self._completed_action_type = 0
 
             logger.info(f"[GatewaySim] Task loaded: {len(task_traj.points)} points, "
                         f"sn={self._current_task_sn}")
@@ -208,11 +224,16 @@ class GatewaySim:
             logger.info(f"[GatewaySim] Task sn={dispatch_task.task_sn} already loaded, skipping")
             return True
 
+        # 必须在 load_task_file 之前设置 _action_seq，
+        # 因为 load_task_file → _publish_task_and_authority 会立即发布 TaskToPlanning
+        self._action_seq = list(dispatch_task.action_seq)
+
         result = self.load_task_file(file_path)
         if result:
             self._current_task_sn = dispatch_task.task_sn
             self._current_task_type = dispatch_task.task_type
-            self._action_seq = list(dispatch_task.action_seq)
+            # 从下发任务转发 commandType (Command.commandType)
+            self._command_type = dispatch_task.command_type
             # 重置上行上报计时器，避免 sim_time 归零后计时器不触发
             self._last_position_report_time = 0.0
             self._last_state_report_time = 0.0
@@ -233,7 +254,10 @@ class GatewaySim:
             task_type=self._current_task_type,
             timestamp=now,
         )
-        self._bus.publish(TASK_TO_PLANNING, t2p)
+        logger.info(f"[GatewaySim] Publishing TaskToPlanning: "
+                    f"actions={len(t2p.action_seq)}, "
+                    f"types={[a.action_type for a in t2p.action_seq]}")
+        self._bus.publish(TASK_TO_PLANNING, t2p, publisher="GatewaySim")
 
     # ========== SimMessageBus 回调 ==========
 
@@ -258,6 +282,31 @@ class GatewaySim:
 
     def _on_control_cmd(self, topic: str, msg: ControlCmd) -> None:
         self._latest_control_cmd = msg
+
+    def _on_planning_result(self, topic: str, msg: PlanningResult) -> None:
+        """缓存最新规划结果，latch action_status=2 确保被位置上报捕获
+
+        C++ 等价行为: BussinessDecision 检测到 action 完成时设置 status=2，
+        GateWay::sendVehiclePositionToCloud 在下次上报中读取并发送。
+        由于规划 (10Hz) 快于位置上报 (1Hz)，需要 latch 机制避免完成信号被覆盖。
+        """
+        self._latest_planning_result = msg
+        # 诊断: 首次收到规划结果时输出 action 状态
+        if not hasattr(self, '_pr_logged'):
+            self._pr_logged = True
+            logger.info(f"[GatewaySim] First PlanningResult received: "
+                        f"action_type={msg.action_type}, action_status={msg.action_status}")
+        # latch: action 完成时缓存 status=2，确保被下一次位置上报捕获
+        if msg.action_status == 2:
+            self._pending_action_completed = True
+            self._completed_action_type = msg.action_type
+            logger.info(f"[GatewaySim] Action completed: type={msg.action_type}, "
+                        f"task_finish={msg.task_finish}")
+        # 任务完成: 所有 action 执行完毕，更新 _task_status → runState 跳变
+        if msg.task_finish and self._task_status == 1:
+            self._task_status = 2
+            logger.info(f"[GatewaySim] Task finished: _task_status 1 → 2, "
+                        f"runState will report 1 (complete)")
 
     @staticmethod
     def _theta_to_geo_heading(theta_rad: float) -> float:
@@ -299,6 +348,42 @@ class GatewaySim:
 
         return mask
 
+    def _get_action_type(self) -> int:
+        """当前 action 类型 (从云端下发任务实时转发)
+
+        执行中转发当前 action 的 actionType，完成后持续转发已完成 action 的类型。
+        值直接来自云端 DispatchTask.command.actionSeq[i].actionType。
+        """
+        if self._pending_action_completed:
+            return self._completed_action_type  # 转发云端下发的原始值
+        pr = self._latest_planning_result
+        return pr.action_type if pr else 0
+
+    def _get_action_status(self) -> int:
+        """当前 action 状态 (0=idle, 1=executing, 2=complete)
+
+        latch 机制: action_status=2 后持久保持，直到新任务下发时清除。
+        这确保完成信号持续上报，不会因单次消费而丢失。
+        """
+        if self._pending_action_completed:
+            return 2
+        pr = self._latest_planning_result
+        return pr.action_status if pr else 0
+
+    def _get_road_id(self, lat: float, lon: float) -> int:
+        """根据 GPS 坐标从高精地图匹配当前所在车道 ID
+
+        Args:
+            lat: 纬度
+            lon: 经度
+
+        Returns:
+            laneid (int), 地图未加载或无匹配时返回 0
+        """
+        if self._map_matcher is None:
+            return 0
+        return self._map_matcher.find_lane_id(lat, lon)
+
     def _publish_position_report(self, sim_time: float) -> None:
         """构造并发布 TruckPositionReport (34 字段，对应 C++ sendVehiclePositionToCloud)"""
         if self._latest_localization is None:
@@ -319,19 +404,21 @@ class GatewaySim:
             "forwardAcceleration": 0.0,
             "lateralAcceleration": 0.0,
             "yawAngularAcceleration": math.degrees(loc.yaw_rate) if loc.yaw_rate else 0.0,
-            "roadId": 0,
-            "pointIndex": 0,
+            "roadId": self._get_road_id(loc.lat, loc.lon),
+            "pointIndex": self._ref_mgr.find_closest_by_latlon(loc.lat, loc.lon),
             "roadResidualDistance": 0.0,
             "operationType": 1,
             "reasonCode": 0,
-            "runState": 1 if self._task_status == 1 else 0,
+            # runState: 0=idle, 1=complete, 2=running
+            "runState": 2 if self._task_status == 1 else (1 if self._task_status == 2 else 0),
             "stopReason": self._compute_stop_reason(),
             "taskSn": self._current_task_sn,
             "taskType": self._current_task_type,
             "taskStatus": self._task_status,
-            "commandType": 0,
-            "actionType": 0,
-            "actionStatus": 0,
+            # 从下发任务实时转发 (Command.commandType)
+            "commandType": self._command_type,
+            "actionType": self._get_action_type(),
+            "actionStatus": self._get_action_status(),
             "utcMilliSeconds": int(time.time() * 1000),
             "currentPathName": "",
             "curAreaBoundaryName": "",
@@ -349,7 +436,10 @@ class GatewaySim:
 
         logger.debug(f"[GatewaySim] Position report: stopReason=0x{payload['stopReason']:05X} "
                      f"({payload['stopReason']}), runState={payload['runState']}, "
-                     f"taskStatus={self._task_status}")
+                     f"taskStatus={self._task_status}, "
+                     f"actionType={payload['actionType']}, actionStatus={payload['actionStatus']}, "
+                     f"pos=({payload['longitude']:.6f},{payload['latitude']:.6f}) "
+                     f"dir={payload['direction']:.1f}° theta={loc.theta:.3f}rad")
 
         msg = CloudDeviceMsg(
             msg_type="position_report",

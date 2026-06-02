@@ -137,7 +137,7 @@ class PerceptionSim:
         # 更新时间戳
         for obs in obstacles:
             obs.timestamp = sim_time
-        self._bus.publish(OBSTACLES, obstacles)
+        self._bus.publish(OBSTACLES, obstacles, publisher="PerceptionSim")
 
     # ========== 预设场景 ==========
 

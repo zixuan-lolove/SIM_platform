@@ -636,8 +636,8 @@ class RealCloudClient:
 
         # stop_index 初始用 endPoint 的 index (后续由 BusinessDecision 在参考线上计算)
         ma = SimMoveAuthority(
-            endpoint_lat=end_pt.lat if end_pt.lat else ep_lat,
-            endpoint_lon=end_pt.lon if end_pt.lon else ep_lon,
+            endpoint_lat=ep_lat if abs(end_pt.lat) < 1e-8 else end_pt.lat,
+            endpoint_lon=ep_lon if abs(end_pt.lon) < 1e-8 else end_pt.lon,
             end_point_index=end_pt.index,
             end_point_line_sn=end_pt.lineSn,
             start_point_lat=start_pt.lat,
@@ -653,6 +653,17 @@ class RealCloudClient:
             line_snq=line_snq,
             timestamp=time.time(),
         )
+
+        # 诊断: 空 endpoint 的 MA (云端下发"停止下发"/"车辆无任务")
+        if abs(ma.endpoint_lat) < 1e-8 and abs(ma.endpoint_lon) < 1e-8:
+            info_str = ", ".join(safe.info[:3]) if safe.info else "N/A"
+            logger.warning(
+                f"[RealCloud] MoveAuthority with empty endpoint "
+                f"(lat={ma.endpoint_lat}, lon={ma.endpoint_lon}), "
+                f"startPoint=({ma.start_point_lat},{ma.start_point_lon}), "
+                f"list_len={segment_count}, safe.info=[{info_str}]"
+            )
+
         self._bus.publish(MOVE_AUTHORITY, ma)
 
     # ========== 上行: SimMessageBus → Protobuf → MQTT ==========

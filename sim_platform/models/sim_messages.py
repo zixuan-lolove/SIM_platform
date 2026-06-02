@@ -172,6 +172,8 @@ class PlanningResult:
     stop: bool = False          # 停车标志
     planner_type: str = "rtk"   # 使用的规划器类型
     planning_time_ms: float = 0.0  # 规划耗时 (ms)
+    action_type: int = 0        # 当前 action 类型 (1=STOP,2=LOAD,3=DUMP,4=LIFT)
+    action_status: int = 0      # 0=idle, 1=executing, 2=complete
     timestamp: float = 0.0
 
 

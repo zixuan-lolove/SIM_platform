@@ -1,5 +1,6 @@
 """主窗口 — 整合所有 UI 组件和仿真引擎"""
 
+import logging
 import math
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -9,6 +10,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QIcon
+
+logger = logging.getLogger(__name__)
 
 from ..models.vehicle_params import VehicleParams
 from ..models.ins_data import InsData
@@ -25,6 +28,9 @@ from .ins_panel import InsPanel
 from .plot_window import PlotWindow
 from .full_stack_panel import FullStackPanel
 from .obstacle_panel import ObstaclePanel
+from .a1_dashboard_panel import A1DashboardPanel
+from .a1_message_flow_panel import A1MessageFlowPanel
+from .traj_test_panel import TrajTestPanel
 
 
 class MainWindow(QMainWindow):
@@ -49,6 +55,13 @@ class MainWindow(QMainWindow):
 
         # 数据曲线图窗（延迟创建）
         self._plot_window: PlotWindow | None = None
+
+        # A1 测试面板（延迟创建）
+        self._a1_dashboard: A1DashboardPanel | None = None
+        self._a1_flow_panel: A1MessageFlowPanel | None = None
+
+        # 轨迹测试面板（延迟创建）
+        self._traj_test_panel: TrajTestPanel | None = None
 
         # 定时器驱动渲染
         self._render_timer = QTimer(self)
@@ -293,6 +306,17 @@ class MainWindow(QMainWindow):
         action_plot.triggered.connect(self._on_show_plot_window)
         toolbar.addAction(action_plot)
 
+        # A1 测试面板按钮
+        action_a1 = QAction("🧪 A1 测试", self)
+        action_a1.triggered.connect(self._on_show_a1_dashboard)
+        toolbar.addAction(action_a1)
+
+        # 轨迹测试面板按钮
+        self._action_traj_test = QAction("📋 轨迹测试", self)
+        self._action_traj_test.setCheckable(True)
+        self._action_traj_test.triggered.connect(self._on_toggle_traj_test)
+        toolbar.addAction(self._action_traj_test)
+
         # 关于
         action_about = QAction("ℹ 关于", self)
         action_about.triggered.connect(self._on_about)
@@ -427,6 +451,10 @@ class MainWindow(QMainWindow):
 
     def _on_sim_state_updated(self, state: VehicleState):
         """仿真状态更新回调"""
+        # 轨迹测试面板: 同步车辆位置
+        if self._traj_test_panel and self._traj_test_panel.isVisible():
+            self._traj_test_panel.set_vehicle_pose(state.x, state.y)
+
         if self._sim_mode == self.MODE_FULL_STACK and self._full_stack_engine:
             self._on_full_stack_state_updated(state)
             return
@@ -501,9 +529,13 @@ class MainWindow(QMainWindow):
         self._stop_render()
         self._update_toolbar_state()
 
-        # 全栈模式: 停止时断开云端
+        # 全栈模式: 停止时断开云端 + 刷新 A1 汇总
         if self._sim_mode == self.MODE_FULL_STACK and self._full_stack_engine is not None:
             self._full_stack_engine.disconnect_cloud()
+            # 汇总 A1 测试结果到仪表盘
+            if self._a1_dashboard is not None:
+                summary = self._full_stack_engine.a1_recorder.get_summary()
+                self._a1_dashboard.update_summary(summary)
 
         self.status_bar.showMessage("仿真已停止", 2000)
 
@@ -540,6 +572,12 @@ class MainWindow(QMainWindow):
             self._start_render()
         else:
             self._stop_render()
+        # A1 面板重置
+        if self._a1_dashboard is not None:
+            self._a1_dashboard.reset()
+        if self._a1_flow_panel is not None:
+            self._a1_flow_panel.reset()
+
         self._refresh_status_display()
         self.map_view.center_on(0.0, 0.0)
         self._update_toolbar_state()
@@ -547,6 +585,8 @@ class MainWindow(QMainWindow):
 
     def _on_ins_applied(self, data: InsData):
         """惯导数据应用：将 INS 位姿（WGS84 经纬度+地理航向）转换为局部 ENU 坐标后写入车辆初始状态"""
+        logger.info(f"[MainWindow] INS applied: lat={data.latitude}, lon={data.longitude}, "
+                    f"heading_geo={data.heading_geo}°")
         # 仅允许在停止或暂停状态下应用
         if self._sim_engine.running and not self._sim_engine.paused:
             self.status_bar.showMessage("⚠ 运行中无法应用惯导数据，请先暂停或停止", 3000)
@@ -560,6 +600,7 @@ class MainWindow(QMainWindow):
                 self._full_stack_engine._converter.set_reference(data.latitude, data.longitude)
                 self._full_stack_engine._ref_lat = data.latitude
                 self._full_stack_engine._ref_lon = data.longitude
+                self._full_stack_engine._ref_from_ins = True
             data.local_x = 0.0
             data.local_y = 0.0
             # 地理航向 (0=北, CW, deg) → 数学角度 (0=东, CCW, deg)
@@ -793,6 +834,52 @@ class MainWindow(QMainWindow):
         self._plot_window.raise_()
         self._plot_window.activateWindow()
 
+    def _on_show_a1_dashboard(self):
+        """打开 A1 测试仪表盘 + 消息流面板"""
+        if self._a1_dashboard is None:
+            self._a1_dashboard = A1DashboardPanel()
+        self._a1_dashboard.show()
+        self._a1_dashboard.raise_()
+
+        if self._a1_flow_panel is None:
+            self._a1_flow_panel = A1MessageFlowPanel()
+            # 从 recorder 加载已有统计
+            if self._full_stack_engine is not None:
+                self._a1_flow_panel.update_from_recorder(
+                    self._full_stack_engine.a1_recorder
+                )
+        self._a1_flow_panel.show()
+        self._a1_flow_panel.raise_()
+
+    def _on_a1_verdict(self, entry) -> None:
+        """A1 判定回调 → 转发到仪表盘面板"""
+        if self._a1_dashboard and self._a1_dashboard.isVisible():
+            self._a1_dashboard.update_verdict(entry)
+
+    def _on_a1_anomaly(self, event) -> None:
+        """A1 异常回调 → 转发到消息流面板"""
+        if self._a1_flow_panel and self._a1_flow_panel.isVisible():
+            self._a1_flow_panel.update_anomaly(event)
+
+    def _on_toggle_traj_test(self, checked: bool):
+        """切换轨迹测试面板 (仅非全栈模式下可用)"""
+        if checked:
+            if self._sim_mode == self.MODE_FULL_STACK:
+                self._action_traj_test.setChecked(False)
+                QMessageBox.information(
+                    self, "轨迹测试",
+                    "轨迹测试工具仅在非全栈模式下可用。\n请先退出全栈模式。"
+                )
+                return
+            if self._traj_test_panel is None:
+                self._traj_test_panel = TrajTestPanel()
+                self._traj_test_panel.set_map_view(self.map_view)
+            self._traj_test_panel.show()
+            self._traj_test_panel.raise_()
+        else:
+            if self._traj_test_panel is not None:
+                self._traj_test_panel.hide()
+
     def _on_about(self):
         QMessageBox.about(
             self,
@@ -823,12 +910,21 @@ class MainWindow(QMainWindow):
         """进入全栈仿真模式"""
         self._sim_mode = self.MODE_FULL_STACK
 
+        # 轨迹测试面板仅非全栈模式可用，切换到全栈时自动关闭
+        if self._traj_test_panel is not None and self._traj_test_panel.isVisible():
+            self._traj_test_panel.hide()
+            self._action_traj_test.setChecked(False)
+
         controller = LatLonController(self._params, config=self._control_config)
         self._full_stack_engine = FullStackEngine(
             self._params, controller=controller
         )
         self._full_stack_engine.set_state_callback(self._on_sim_state_updated)
         self._sim_engine = self._full_stack_engine
+
+        # ── A1 回调绑定 ──
+        self._full_stack_engine.set_a1_verdict_callback(self._on_a1_verdict)
+        self._full_stack_engine.set_a1_anomaly_callback(self._on_a1_anomaly)
 
         # QStackedWidget 切换：0=control_panel → 1=_full_stack_panel
         self._mode_stack.setCurrentIndex(1)

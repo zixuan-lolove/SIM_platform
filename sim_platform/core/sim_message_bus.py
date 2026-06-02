@@ -53,7 +53,9 @@ class MessageLogEntry:
     """单条消息日志"""
     topic: str
     timestamp: float
-    msg_type: str  # 消息对象的类名
+    msg_type: str          # 消息对象的类名
+    sequence_id: int = 0   # per-topic 单调递增序号 (A1 消息流追踪)
+    publisher: str = ""    # 发布模块名 (A1 路由验证)
 
 
 class SimMessageBus:
@@ -72,20 +74,24 @@ class SimMessageBus:
     def __init__(self, max_log_entries: int = 10000):
         self._subscribers: dict[str, list[Callable[[str, Any], None]]] = defaultdict(list)
         self._message_counts: dict[str, int] = defaultdict(int)
+        self._seq_counters: dict[str, int] = defaultdict(int)  # A1: per-topic 序列号
         self._message_log: list[MessageLogEntry] = []
         self._max_log_entries = max_log_entries
         self._lock = threading.Lock()
 
-    def publish(self, topic: str, msg: Any) -> None:
+    def publish(self, topic: str, msg: Any, publisher: str = "") -> None:
         """发布消息到指定 Topic，同步调用所有订阅者回调
 
         Args:
             topic: Topic 名称（使用模块级常量，如 LOCALIZATION）
             msg: 消息体（dataclass 实例）
+            publisher: 发布模块名（可选，如 "Kinematics", "PlanningSim"），用于 A1 消息流追踪
         """
         with self._lock:
             self._message_counts[topic] += 1
-            self._log_message(topic, msg)
+            self._seq_counters[topic] += 1
+            seq = self._seq_counters[topic]
+            self._log_message(topic, msg, seq, publisher)
             callbacks = list(self._subscribers.get(topic, []))
 
         for callback in callbacks:
@@ -116,6 +122,7 @@ class SimMessageBus:
         with self._lock:
             self._subscribers.clear()
             self._message_counts.clear()
+            self._seq_counters.clear()
             self._message_log.clear()
 
     def get_stats(self) -> dict[str, int]:
@@ -133,13 +140,21 @@ class SimMessageBus:
         with self._lock:
             return len(self._subscribers.get(topic, []))
 
-    def _log_message(self, topic: str, msg: Any) -> None:
+    def get_seq_counter(self, topic: str) -> int:
+        """获取指定 Topic 的当前序列号 (A1 丢帧检测)"""
+        with self._lock:
+            return self._seq_counters.get(topic, 0)
+
+    def _log_message(self, topic: str, msg: Any, seq: int = 0,
+                     publisher: str = "") -> None:
         """记录消息到内部日志（用于调试 F-11-05）"""
         timestamp = getattr(msg, "timestamp", 0.0)
         entry = MessageLogEntry(
             topic=topic,
             timestamp=timestamp,
             msg_type=type(msg).__name__,
+            sequence_id=seq,
+            publisher=publisher,
         )
         self._message_log.append(entry)
         if len(self._message_log) > self._max_log_entries:

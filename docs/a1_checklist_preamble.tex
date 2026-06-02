@@ -1,0 +1,69 @@
+% --- Font Setup with HarfBuzz for automatic font fallback ---
+\usepackage{fontspec}
+\setmainfont{Noto Serif CJK SC}[
+  % Renderer=HarfBuzz,
+  BoldFont=Noto Serif CJK SC,
+  ItalicFont=Noto Serif CJK SC,
+  BoldItalicFont=Noto Serif CJK SC
+]
+\setmonofont{Noto Sans Mono CJK SC}[
+  % Renderer=HarfBuzz,
+  Scale=0.9,
+  BoldFont=Noto Sans Mono CJK SC
+]
+
+% --- Page Layout ---
+\usepackage[a4paper,margin=2.5cm,top=2cm,bottom=2.5cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% --- Headers & Footers ---
+\usepackage{fancyhdr}
+\fancyhf{}
+\fancyhead[L]{\small C++ 代码工程功能开发 — 缺失项清单}
+\fancyhead[R]{\small V3.1}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\pagestyle{fancy}
+
+% --- Colors & Links ---
+\usepackage{xcolor}
+\definecolor{linkblue}{RGB}{0,90,160}
+\definecolor{codebg}{RGB}{245,245,248}
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=linkblue,
+  urlcolor=linkblue,
+  citecolor=linkblue
+}
+
+% --- Tables ---
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{etoolbox}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.2}
+
+% Use \small font + permissive line breaking inside all tables
+\AtBeginEnvironment{longtable}{\small\sloppy\emergencystretch=2em}
+
+% Allow hyphens in monospace / typewriter text for inline code
+% This helps long identifiers like gateway.cc:199-201 break across lines
+\let\oldtexttt\texttt
+\renewcommand{\texttt}[1]{%
+  \oldtexttt{\hyphenchar\font=`\-\relax\fontdimen3\font=0.3em\relax #1}%
+}
+
+% --- Lists ---
+\usepackage{enumitem}
+\setlist{nosep,leftmargin=*}
+
+% --- Captions ---
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf}
+
+% Prevent overfull hbox issues
+\tolerance=1000
+\emergencystretch=3em

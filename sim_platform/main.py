@@ -5,6 +5,8 @@ import logging
 import logging.handlers
 import sys
 import os
+# protobuf C 扩展与 numpy 不兼容会导致字段返回 0，必须在任何 protobuf import 之前设置
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 from datetime import datetime
 
 # 将项目根目录（sim_platform 的父目录）加入 Python 路径

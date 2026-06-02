@@ -36,6 +36,36 @@ SIGNAL_CATALOG = {
         ("error.heading", "航向偏差", "deg"),
         ("error.speed", "速度偏差", "km/h"),
     ],
+    # ── A1 数据隔离测量信号 ──
+    "A1 路由 (A1-01)": [
+        ("a1.routing.hash_Localization",       "Loc路由hash",     ""),
+        ("a1.routing.hash_Chassis",            "Chs路由hash",     ""),
+        ("a1.routing.hash_PlanningResult",     "Plan路由hash",    ""),
+        ("a1.routing.hash_ControlCmd",         "Ctrl路由hash",    ""),
+        ("a1.routing.hash_Obstacles",          "Obs路由hash",     ""),
+        ("a1.routing.hash_TaskToPlanning",     "T2P路由hash",     ""),
+        ("a1.routing.hash_MoveAuthority",      "MovAuth路由hash", ""),
+        ("a1.routing.hash_CloudDispatchTask",  "CDT路由hash",     ""),
+        ("a1.routing.hash_CloudDeviceMsg",     "CDM路由hash",     ""),
+        ("a1.routing.sub_count",              "订阅者总数",       "个"),
+        ("a1.routing.msg_size_bytes",          "消息大小",         "B"),
+    ],
+    "A1 时序 (A1-02)": [
+        ("a1.timing.sim_deviation_ms",  "内部时间戳偏差", "ms"),
+        ("a1.timing.mqtt_drift_ms",     "MQTT时钟漂移",  "ms"),
+    ],
+    "A1 延迟 (A1-04)": [
+        ("a1.latency.plan_time_ms",     "规划耗时",     "ms"),
+        ("a1.latency.step_jitter_ms",   "仿真步长抖动",  "ms"),
+        ("a1.latency.e2e_loc_to_cmd_ms","端到端延迟",    "ms"),
+    ],
+    "A1 流量 (A1-03)": [
+        ("a1.flow.localization_hz",     "Localization频率", "Hz"),
+        ("a1.flow.planning_hz",         "Planning频率",     "Hz"),
+        ("a1.flow.control_hz",          "Control频率",      "Hz"),
+        ("a1.flow.chassis_hz",          "Chassis频率",      "Hz"),
+        ("a1.flow.obstacles_hz",        "Obstacles频率",    "Hz"),
+    ],
 }
 
 CURVE_COLORS = [

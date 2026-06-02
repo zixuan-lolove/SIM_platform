@@ -21,41 +21,71 @@ def _find_nearest_point(x: float, y: float, pts: list) -> "TrajPoint":
 
 
 class BSplineSmoother:
-    """三次 B 样条参考线平滑器"""
+    """三次 B 样条参考线平滑器
+
+    参数:
+        ctrl_step: 控制点采样步长，每隔 N 个原始点取 1 个作为 B 样条控制点。
+                   值越大越平滑，默认 4。
+        resample_step: 重采样步长 (m)，默认 0.2。
+    """
+
+    def __init__(self, ctrl_step: int = 4, resample_step: float = 0.2):
+        self._ctrl_step = ctrl_step
+        self._resample_step = resample_step
 
     def smooth(self, input_traj: TaskTraj) -> TaskTraj:
-        """主平滑入口"""
+        """Clamped B 样条平滑: 锁首尾端点, 中间控制点做 B 样条逼近"""
         pts = input_traj.points
         if len(pts) < 3:
             return input_traj
 
-        # 以第一个点为参考点，转 XY
-        ref_lat = pts[0].lat
-        ref_lon = pts[0].lon
-        converter = LocalCoordinateConverter()
-        converter.set_reference(ref_lat, ref_lon)
-        raw_xy = [converter.latlon_to_xy(p.lat, p.lon) for p in pts]
+        # 直接使用 TrajPoint 自带的 ENU x,y (避免 lat/lon↔XY 重转换引入误差)
+        raw_xy = [(p.x, p.y) for p in pts]
 
-        # B 样条平滑 (200 点)
-        smooth_xy = self._smooth_raw(raw_xy, 200)
+        start_xy = raw_xy[0]
+        end_xy = raw_xy[-1]
 
-        # 0.2m 固定步长重采样
-        resampled = self._resample_fixed_step(smooth_xy, 0.2)
+        # ── 下采样控制点 ──
+        ctrl_xy = raw_xy[::self._ctrl_step]
+        ctrl_xy = list(ctrl_xy)
+        if ctrl_xy[-1] != end_xy:
+            ctrl_xy.append(end_xy)
+        if len(ctrl_xy) < 3:
+            ctrl_xy = [start_xy, raw_xy[len(raw_xy)//2], end_xy]
 
-        # 构建输出 — 为每个重采样点从原始点中查找最近点来继承属性
+        # ── Clamped 端点: 首尾控制点各重复 k=4 次 (三次 B 样条) ──
+        K = 4  # cubic B-spline 阶数
+        clamped_ctrl = [start_xy] * (K - 1) + ctrl_xy + [end_xy] * (K - 1)
+
+        # B 样条平滑
+        smooth_num = max(200, len(clamped_ctrl) * 6)
+        smooth_xy = self._smooth_raw(clamped_ctrl, smooth_num)
+
+        # 固定步长重采样
+        resampled = self._resample_fixed_step(smooth_xy, self._resample_step)
+
+        # ── 端点硬修正 ──
+        if len(resampled) >= 2:
+            resampled[0] = start_xy
+            resampled[-1] = end_xy
+
+        # 构建输出 (XY 直接从 smoothed 取值, lat/lon 从原始点最近点继承)
         output = TaskTraj(task_id=input_traj.task_id)
         for _, (x, y) in enumerate(resampled):
-            lat, lon = converter.xy_to_latlon(x, y)
             tp = TrajPoint()
             tp.x = x
             tp.y = y
-            tp.lat = lat
-            tp.lon = lon
-
-            # 在原始点中找到离当前重采样点最近的点，继承其属性
+            # lat/lon 从最近原始点继承 (近似)
             src = _find_nearest_point(x, y, pts)
-            tp.heading = src.heading
-            tp.theta = src.theta
+            tp.lat = src.lat
+            tp.lon = src.lon
+            tp = TrajPoint()
+            tp.x = x
+            tp.y = y
+
+            src = _find_nearest_point(x, y, pts)
+            tp.lat = src.lat
+            tp.lon = src.lon
             tp.altitude = src.altitude
             tp.v = src.v
             tp.planned_v = src.planned_v
@@ -69,6 +99,29 @@ class BSplineSmoother:
             tp.slope = src.slope
             tp.curvature = src.curvature
             output.points.append(tp)
+
+        # 从平滑后的 XY 几何反算 theta 和 heading
+        n_pts = len(output.points)
+        for i in range(n_pts):
+            if n_pts >= 2:
+                if i == 0:
+                    dx = output.points[1].x - output.points[0].x
+                    dy = output.points[1].y - output.points[0].y
+                elif i == n_pts - 1:
+                    dx = output.points[-1].x - output.points[-2].x
+                    dy = output.points[-1].y - output.points[-2].y
+                else:
+                    dx = output.points[i + 1].x - output.points[i - 1].x
+                    dy = output.points[i + 1].y - output.points[i - 1].y
+                if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+                    theta = math.atan2(dy, dx)
+                    output.points[i].theta = theta
+                    hdg_deg = 90.0 - math.degrees(theta)
+                    while hdg_deg < 0:
+                        hdg_deg += 360.0
+                    while hdg_deg >= 360.0:
+                        hdg_deg -= 360.0
+                    output.points[i].heading = hdg_deg
 
         # 重建累计里程
         s = 0.0

@@ -24,6 +24,8 @@ from .sim_message_bus import (
     CHASSIS,
     CONTROL_CMD,
     CLOUD_DISPATCH_TASK,
+    MOVE_AUTHORITY,
+    PLANNING_RESULT,
 )
 from ..models.vehicle_params import VehicleParams
 from ..models.trajectory import Trajectory, TrajectoryPoint
@@ -41,6 +43,11 @@ from ..gateway_sim.reference_line_mgr import ReferenceLineManager
 from ..perception_sim.perception_sim import PerceptionSim
 from ..planning_sim.planning_sim import PlanningSim
 from ..planning_sim.coordinate_converter import LocalCoordinateConverter
+
+# A1 数据隔离测试模块
+from ..a1.a1_validation_engine import A1ValidationEngine
+from ..a1.a1_test_recorder import A1TestRecorder
+from ..a1.a1_test_registry import A1_TEST_CASES
 
 
 class FullStackEngine(SimEngine):
@@ -78,10 +85,7 @@ class FullStackEngine(SimEngine):
         # 参考线管理器 (Gateway 和 Planning 共享)
         self.ref_mgr = ReferenceLineManager()
 
-        # 各仿真模块
-        self.gateway = GatewaySim(self.bus)
-
-        # 云端配置: 环境变量 SIM_CLOUD_CONFIG 优先; SIM_USE_LOCAL_CLOUD=1 切换本地
+        # 云端配置路径 (GatewaySim 需要 map_file_folder 用于地图匹配)
         _cloud_config_path = os.environ.get("SIM_CLOUD_CONFIG", "")
         if not _cloud_config_path:
             _local_cfg = os.path.join(os.path.dirname(__file__), "..", "config", "cloud_config_local.ini")
@@ -90,12 +94,36 @@ class FullStackEngine(SimEngine):
             else:
                 _cloud_config_path = os.path.join(os.path.dirname(__file__), "..", "config", "cloud_config.ini")
 
+        # 从配置中读取 map_file_folder
+        _map_folder = self._read_map_folder(_cloud_config_path)
+
+        # 各仿真模块
+        self.gateway = GatewaySim(self.bus, map_folder=_map_folder)
+
         self.cloud = RealCloudClient(self.bus, config_path=_cloud_config_path)
         self.perception = PerceptionSim(self.bus)
         self.planning = PlanningSim(self.bus, self.ref_mgr)
 
+        # ── A1 数据隔离测试层 ──
+        self.a1_recorder = A1TestRecorder()
+        self.a1_validator = A1ValidationEngine(
+            self.bus, self.a1_recorder, data_logger=self.data_logger
+        )
+        self.a1_validator.register_all_cases(A1_TEST_CASES)
+        # 注入参考线验证回调到 BusinessDecision
+        self.planning._decision.set_ref_line_validator(
+            self.a1_validator.validate_ref_line
+        )
+        # A1 UI 回调 (由 MainWindow 设置)
+        self._on_a1_verdict = None
+        self._on_a1_anomaly = None
+        self.a1_validator.set_verdict_callback(self._emit_a1_verdict)
+        self.a1_validator.set_anomaly_callback(self._emit_a1_anomaly)
+
         # 订阅云端任务下发 (在 GatewaySim 之后订阅，确保回调在 Gateway 加载完成后执行)
         self.bus.subscribe(CLOUD_DISPATCH_TASK, self._on_cloud_task_dispatched)
+        # 订阅路权: 任务下载失败时，用 MA startPoint 初始化坐标转换器
+        self.bus.subscribe(MOVE_AUTHORITY, self._on_move_authority_for_ref)
 
         # 控制器
         self._full_stack_controller: Controller = controller or LatLonController(params)
@@ -109,10 +137,13 @@ class FullStackEngine(SimEngine):
         # 最新的 ControlCmd (用于发布到总线)
         self._latest_control_cmd: Optional[ControlCmd] = None
 
-        # WGS84 参考原点 (从轨迹第一个点获取，用于 ENU → 经纬度转换)
-        self._ref_lat: float = 0.0
-        self._ref_lon: float = 0.0
+        # WGS84 参考原点 (用于 ENU → 经纬度转换)
+        # 默认值为矿场区域近似中心点，确保无任务时也能正常上报位置
+        self._ref_lat: float = 32.05458
+        self._ref_lon: float = 118.41239
+        self._ref_from_ins: bool = False  # INS 面板是否显式设定过
         self._converter = LocalCoordinateConverter()
+        self._converter.set_reference(self._ref_lat, self._ref_lon)
 
         # 节流时间戳
         self._last_planning_time: float = -1.0
@@ -125,6 +156,19 @@ class FullStackEngine(SimEngine):
         # 默认 AUTO 模式
         self.control_mode = ControlMode.AUTO
         self._full_stack_controller.reset()
+
+    @staticmethod
+    def _read_map_folder(config_path: str) -> str:
+        """从云端配置文件中读取 map_file_folder"""
+        import configparser
+        if not config_path or not os.path.exists(config_path):
+            return ""
+        try:
+            cfg = configparser.ConfigParser()
+            cfg.read(config_path)
+            return cfg.get("download", "map_file_folder", fallback="")
+        except Exception:
+            return ""
 
     # ========== 属性 ==========
 
@@ -176,8 +220,8 @@ class FullStackEngine(SimEngine):
                     f"points={len(ref.points)}")
         self._last_task_sn = dt.task_sn
 
-        # 若 INS 未设定参考原点，回退用轨迹第一个点
-        if self._ref_lat == 0.0 and self._ref_lon == 0.0:
+        # 任务首点是最准确的参考原点，覆盖默认值（INS 显式设定时不覆盖）
+        if not self._ref_from_ins:
             self._ref_lat = ref.points[0].lat
             self._ref_lon = ref.points[0].lon
             self._converter.set_reference(self._ref_lat, self._ref_lon)
@@ -190,6 +234,23 @@ class FullStackEngine(SimEngine):
         # 车辆初始位置设为轨迹起点，航向取轨迹第一个点
         init_theta = ref.points[0].theta if ref.points else 0.0
         self.reset(VehicleState(x=0.0, y=0.0, theta=init_theta), clear_trail=False)
+
+    def _on_move_authority_for_ref(self, topic: str, msg) -> None:
+        """任务下载失败时，用 MA 的 startPoint 初始化坐标转换器
+
+        无任务时 _on_cloud_task_dispatched 不会被调用，转换器 reference 保持 (0,0)，
+        导致位置上报经纬度为 0。MA 的 startPoint 包含车辆当前 GPS 坐标，可作参考原点。
+        """
+        # 默认参考原点已在 __init__ 中设置，仅在 MA 有更精确的 startPoint 时更新
+        if self._ref_from_ins:
+            return  # INS 显式设定，不覆盖
+        if abs(msg.start_point_lat) < 1e-8 and abs(msg.start_point_lon) < 1e-8:
+            return  # MA 无有效 startPoint
+        self._ref_lat = msg.start_point_lat
+        self._ref_lon = msg.start_point_lon
+        self._converter.set_reference(self._ref_lat, self._ref_lon)
+        logger.info(f"[FullStack] Converter reference set from MA startPoint: "
+                    f"({self._ref_lat:.6f}, {self._ref_lon:.6f})")
 
     def _recompute_traj_enu(self) -> None:
         """用 converter 从 WGS84 lat/lon 重新计算所有参考线点的 ENU (x,y,theta,s)
@@ -235,6 +296,26 @@ class FullStackEngine(SimEngine):
     def disconnect_cloud(self) -> None:
         self.cloud.disconnect()
 
+    # ── A1 回调设置 (供 MainWindow 使用) ──
+
+    def set_a1_verdict_callback(self, cb) -> None:
+        """设置 A1 判定 UI 回调"""
+        self._on_a1_verdict = cb
+
+    def set_a1_anomaly_callback(self, cb) -> None:
+        """设置 A1 异常 UI 回调"""
+        self._on_a1_anomaly = cb
+
+    def _emit_a1_verdict(self, entry) -> None:
+        """内部: 转发 A1 判定到 UI 回调"""
+        if self._on_a1_verdict:
+            self._on_a1_verdict(entry)
+
+    def _emit_a1_anomaly(self, event) -> None:
+        """内部: 转发 A1 异常到 UI 回调"""
+        if self._on_a1_anomaly:
+            self._on_a1_anomaly(event)
+
     # ========== 主循环 (100Hz) ==========
 
     def step(self) -> VehicleState:
@@ -247,6 +328,9 @@ class FullStackEngine(SimEngine):
         self._last_step_time = now
         if elapsed > 0:
             self.real_time_factor = self.dt / elapsed
+
+        # ── A1 时间同步: 确保验证引擎使用当前帧的 sim_time ──
+        self.a1_validator.sync_time(self._sim_time)
 
         # ── 阶段 1: 发布里程计 (Localization + Chassis) ──
         self._publish_odometry()
@@ -261,6 +345,24 @@ class FullStackEngine(SimEngine):
             self._latest_planning_result = self.planning.plan(self._sim_time)
             if self._latest_planning_result and self._latest_planning_result.points:
                 self._planning_traj = self._planning_result_to_traj(self._latest_planning_result)
+                # 诊断: 首次成功规划时输出轨迹信息
+                if self._step_count <= 100:
+                    pts = self._latest_planning_result.points
+                    velocities = [p.velocity for p in pts[:5]]
+                    logger.info(f"[FullStack] Planning OK: {len(pts)} pts, "
+                                f"first velocities={[f'{v:.2f}' for v in velocities]}, "
+                                f"stop={self._latest_planning_result.stop}, "
+                                f"task_finish={self._latest_planning_result.task_finish}")
+            else:
+                # 诊断: 规划返回空
+                if self._step_count <= 100 or self._step_count % 500 == 0:
+                    has_task = self.planning.has_task
+                    has_loc = self.planning._latest_localization is not None
+                    has_ma = self.planning._latest_move_authority is not None
+                    n_pts = len(self._latest_planning_result.points) if self._latest_planning_result else 0
+                    logger.warning(f"[FullStack] Planning returned None/empty: "
+                                   f"has_task={has_task}, has_loc={has_loc}, "
+                                   f"has_ma={has_ma}, result_pts={n_pts}")
             self._last_planning_time = self._sim_time
 
         # ── 阶段 4: 控制指令生成 ──
@@ -273,6 +375,12 @@ class FullStackEngine(SimEngine):
             self.target_steer_sw_deg = cmd.steer_angle * self.params.steer_ratio
             self.target_velocity_kmh = cmd.target_velocity
             self.target_brake_pressure = (cmd.brake / 100.0) * self.params.max_brake_pressure
+            # 诊断: 首次控制输出
+            if self._step_count <= 3:
+                logger.info(f"[FullStack] Control cmd: target_v={cmd.target_velocity:.2f} km/h, "
+                            f"steer={cmd.steer_angle:.2f}°, throttle={cmd.throttle:.1f}, "
+                            f"brake={cmd.brake:.1f}, speed_err={cmd.speed_error:.2f}")
+
             self._latest_control_cmd = ControlCmd(
                 steer_angle=cmd.steer_angle,
                 target_velocity=cmd.target_velocity,
@@ -283,7 +391,7 @@ class FullStackEngine(SimEngine):
                 speed_error=cmd.speed_error,
                 timestamp=self._sim_time,
             )
-            self.bus.publish(CONTROL_CMD, self._latest_control_cmd)
+            self.bus.publish(CONTROL_CMD, self._latest_control_cmd, publisher="Controller")
 
             # 终点检测 (进度 > 99% → 停车)
             if self._planning_traj and len(self._planning_traj) > 1:
@@ -300,6 +408,10 @@ class FullStackEngine(SimEngine):
                 elif progress > 0.85:
                     scale = (1.0 - progress) / 0.15
                     self.target_velocity_kmh *= scale
+        elif self._step_count <= 3:
+            logger.warning(f"[FullStack] Control SKIPPED: mode={self.control_mode}, "
+                           f"ctrl={self._full_stack_controller is not None}, "
+                           f"traj={self._planning_traj is not None}")
 
         # ── 阶段 5: 运动学更新 ──
         self._prev_state = self.state.clone()
@@ -328,6 +440,9 @@ class FullStackEngine(SimEngine):
         # ── 阶段 6: Gateway 上行上报 ──
         self.gateway.update_uplink_reports(self._sim_time)
 
+        # ── 阶段 7: A1 验证引擎周期性检查 ──
+        self.a1_validator.step(self._sim_time)
+
         return self.state
 
     # ========== 里程计发布 ==========
@@ -354,7 +469,7 @@ class FullStackEngine(SimEngine):
             satellite_count=20,
             hdop=0.8,
         )
-        self.bus.publish(LOCALIZATION, loc)
+        self.bus.publish(LOCALIZATION, loc, publisher="Kinematics")
 
         ch = Chassis(
             gear=s.gear,
@@ -363,7 +478,7 @@ class FullStackEngine(SimEngine):
             speed_kmh=s.v_kmh,
             timestamp=self._sim_time,
         )
-        self.bus.publish(CHASSIS, ch)
+        self.bus.publish(CHASSIS, ch, publisher="Kinematics")
 
     # ========== 数据记录 ==========
 

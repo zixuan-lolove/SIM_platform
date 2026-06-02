@@ -4,7 +4,7 @@
 """
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,32 @@ class BusinessDecision:
         self._last_localization_time: float = 0.0
         self._last_chassis_time: float = 0.0
         self._last_obstacles_time: float = 0.0
+        # A1 参考线验证回调 (由 A1ValidationEngine 注入)
+        self._ref_line_validator: Optional[Callable[[list], None]] = None
 
     def reset(self) -> None:
         self._task_index = 0
         self._last_action = UNKNOWN_ACTION
         self._dump_process = 0
         self._dump_cycle_counter = 0
+
+    def set_ref_line_validator(self, validator: Optional[Callable[[list], None]]) -> None:
+        """设置参考线验证回调 (A1-06/07/08/09)
+
+        由 A1ValidationEngine 注入。回调签名为:
+            validator(points: list[TrajPoint]) -> None
+        在参考线加载/更新时调用。
+        """
+        self._ref_line_validator = validator
+
+    def validate_current_ref_line(self, points: list) -> None:
+        """触发参考线验证 (供 PlanningSim 在任务加载时调用)
+
+        Args:
+            points: TrajPoint 对象列表
+        """
+        if self._ref_line_validator and points:
+            self._ref_line_validator(points)
 
     def proc(self, frame: "PlanningFrame", sim_time: float = 0.0) -> None:
         """每规划周期执行一次的主决策逻辑 — 对应 C++ BussinessDecision::proc
@@ -58,9 +78,22 @@ class BusinessDecision:
         # 路权处理 (C++ lines 34-51: 无条件计算 autor_index + min-tracking + clamp)
         self._update_stop_from_authority(frame)
 
+        # 当前 action 类型 (在完成判定之前设置，确保完成时上报的是已完成 action 的类型)
+        current_action_type = 0
+        if frame.action_seq and self._task_index < len(frame.action_seq):
+            current_action_type = frame.action_seq[self._task_index].action_type
+
         # 任务完成判定
-        if self._current_task_finish(frame):
+        action_completed = self._current_task_finish(frame)
+        if action_completed:
+            # action 完成: 上报已完成 action 的类型 + status=2 (complete)
+            frame.action_type = current_action_type
+            frame.action_status = 2
             self._task_index += 1
+        else:
+            # action 执行中: status=1 (executing)
+            frame.action_type = current_action_type
+            frame.action_status = 1
 
         if frame.action_seq and self._task_index >= len(frame.action_seq):
             frame.task_finish = True
@@ -80,9 +113,9 @@ class BusinessDecision:
     def _update_stop_from_authority(self, frame: "PlanningFrame") -> None:
         """路权处理 — 对应 C++ BussinessDecision::proc lines 34-51
 
-        无条件计算 autor_index: 无 MA 时 endpoint=(0,0) → 最近点 ≈ 0，
-        min-tracking 后 stop_index → 0，车辆停车。
-        MA 到达后 endpoint 为正确坐标 → stop_index 更新为路权值。
+        无条件计算 autor_index；空 endpoint (0,0) 时跳过更新 (云端"停止下发"指令)，
+        避免 min-tracking 将 stop_index 锁死在 0 导致有效 MA 无法恢复。
+        有效 MA 到达后 endpoint 为正确坐标 → stop_index 更新为路权值。
         """
         if not frame.ref_mgr:
             return
@@ -94,6 +127,17 @@ class BusinessDecision:
         ma = frame.move_authority
         end_lat = ma.endpoint_lat if ma is not None else 0.0
         end_lon = ma.endpoint_lon if ma is not None else 0.0
+
+        # 忽略空 endpoint 的 MA: 云端下发"停止下发"/"车辆无任务"时 endpoint 为 (0,0)
+        # 若不拦截，min-tracking 会将 stop_index 锁死在 0，后续有效 MA 无法恢复
+        if abs(end_lat) < 1e-8 and abs(end_lon) < 1e-8:
+            cnt = getattr(self, '_stop_log_cnt', 0)
+            if cnt <= 3 or cnt % 500 == 0:
+                logger.warning(
+                    f"[BizDecision] Ignoring MA with empty endpoint "
+                    f"(lat={end_lat}, lon={end_lon}) — stop_index unchanged"
+                )
+            return
 
         # 在当前参考线上找最近点 (C++ lines 44-45: getCurrentReferenceLine())
         autor_index = 0
@@ -107,10 +151,21 @@ class BusinessDecision:
                 autor_index = i
 
         # min-tracking (C++ line 47: updateStopIndex)
+        old_stop = frame.ref_mgr.stop_index if frame.ref_mgr.stop_index < 10**8 else -1
         frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index, autor_index)
 
         # 无条件钳位到参考线末尾 (C++ lines 49-51)
         frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index, len(ref.points) - 1)
+
+        # 诊断日志 (前 3 次 + 每 500 周期)
+        if not hasattr(self, '_stop_log_cnt'):
+            self._stop_log_cnt = 0
+        self._stop_log_cnt += 1
+        if self._stop_log_cnt <= 3 or self._stop_log_cnt % 500 == 0:
+            logger.info(f"[BizDecision] stop_index: {old_stop} → autor={autor_index} "
+                        f"→ final={frame.ref_mgr.stop_index} "
+                        f"(ep=({end_lat:.6f},{end_lon:.6f}), n_pts={len(ref.points)}, "
+                        f"ma={'set' if ma else 'None'})")
 
     def _current_task_finish(self, frame: "PlanningFrame") -> bool:
         """判断当前动作是否完成"""
@@ -120,12 +175,12 @@ class BusinessDecision:
         action = frame.action_seq[self._task_index]
 
         if action.action_type == STOP_ACTION:
-            # C++: 用完整的 task_trajectory 重新计算 task_index, 与 key_index 比较
+            # C++: 用 action 的目标位置在完整 task_trajectory 上找 task_index，
+            # 与 key_index (车辆当前位置) 比较，判断是否到达停车点
             result = False
             pts = frame.ref_mgr.get_all_points()
             if pts and frame.localization:
-                loc = frame.localization
-                task_index = frame.ref_mgr.find_closest_index(loc.x, loc.y)
+                task_index = frame.ref_mgr.find_closest_by_latlon(action.lat, action.lon)
                 # C++: key_index > task_index - 8 (task_index == key_index → 立即完成)
                 if frame.key_index > task_index - 8:
                     frame.stop = True

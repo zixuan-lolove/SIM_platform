@@ -79,22 +79,36 @@ class RTKPlanner:
             )
             trajectory.append(pt)
 
-        # 障碍物处理
+        # 障碍物处理 (_deal_obstacles 返回局部索引，需统一坐标系)
+        local_stop = stop_index - key_index
         if obstacles:
             new_stop = self._deal_obstacles(trajectory, obstacles)
-            if new_stop < stop_index:
-                stop_index = new_stop
+            if new_stop < local_stop:
+                local_stop = new_stop
 
         # 速度规划
+        target_idx = max(0, min(local_stop, len(trajectory) - 1))
         from .velocity_planner import VelocityPlanner
         VelocityPlanner.plan_velocity(
             cur_index=0,
-            target_index=min(stop_index, len(trajectory) - 1),
+            target_index=target_idx,
             trajectory=trajectory,
             ref_decel=self.ref_decel,
         )
 
-        return trajectory, stop_index
+        # 诊断日志 (前 3 次 + 每 500 周期)
+        if not hasattr(self, '_plan_log_cnt'):
+            self._plan_log_cnt = 0
+        self._plan_log_cnt += 1
+        if self._plan_log_cnt <= 3 or self._plan_log_cnt % 500 == 0:
+            vels = [f"{p.velocity:.2f}" for p in trajectory[:5]]
+            logger.info(f"[RTKPlanner] key_idx={key_index}, stop_idx={stop_index}, "
+                        f"local_stop={local_stop}, local_pts={len(trajectory)}, "
+                        f"first_v={vels}, target_idx={target_idx}")
+
+        # 写回的 stop_index 保持全局坐标系 (local_stop 转回全局)
+        updated_stop = key_index + local_stop
+        return trajectory, updated_stop
 
     def _deal_obstacles(
         self,

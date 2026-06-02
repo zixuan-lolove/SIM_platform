@@ -32,15 +32,39 @@ class MapView(QWidget):
         self._trail_x: list[float] = []
         self._trail_y: list[float] = []
 
-        # 参考轨迹
+        # 参考轨迹 (原始)
         self._ref_traj_x: list[float] = []
         self._ref_traj_y: list[float] = []
+        self._ref_traj_heading: list[float] = []  # 各点航向角 (rad)
+        self._has_heading: bool = False
+
+        # 平滑后参考轨迹
+        self._smooth_traj_x: list[float] = []
+        self._smooth_traj_y: list[float] = []
+        self._smooth_traj_heading: list[float] = []
+        self._has_smooth: bool = False
+
         self._lookahead_x: float = 0.0
         self._lookahead_y: float = 0.0
         self._has_lookahead: bool = False
 
         # 障碍物
         self._obstacles: list = []
+
+        # 参考线起点标记 (轨迹测试)
+        self._ref_start_x: float = 0.0
+        self._ref_start_y: float = 0.0
+        self._has_ref_start: bool = False
+
+        # 车辆→参考线起点距离辅助线
+        self._dist_line_x1: float = 0.0
+        self._dist_line_y1: float = 0.0
+        self._dist_line_x2: float = 0.0
+        self._dist_line_y2: float = 0.0
+        self._has_dist_line: bool = False
+
+        # A1-06 航向跳变异常标记
+        self._anomaly_markers: list[tuple[float, float]] = []
 
         # 平移 & 缩放
         self._offset_x: float = 0.0
@@ -74,10 +98,26 @@ class MapView(QWidget):
         self._trail_y = trail_y
         self.update()
 
-    def set_reference_trajectory(self, traj_x: list[float], traj_y: list[float]):
-        """设置参考轨迹"""
+    def set_reference_trajectory(self, traj_x: list[float], traj_y: list[float],
+                                  headings: list[float] | None = None):
+        """设置参考轨迹，可选附带各点航向角 (rad) 用于绘制航向箭头"""
         self._ref_traj_x = traj_x
         self._ref_traj_y = traj_y
+        if headings is not None and len(headings) == len(traj_x):
+            self._ref_traj_heading = headings
+            self._has_heading = True
+        else:
+            self._ref_traj_heading = []
+            self._has_heading = False
+        self.update()
+
+    def set_smoothed_trajectory(self, traj_x: list[float], traj_y: list[float],
+                                 headings: list[float]):
+        """设置平滑后参考轨迹 (深红色虚线 + 深红色航向箭头)"""
+        self._smooth_traj_x = traj_x
+        self._smooth_traj_y = traj_y
+        self._smooth_traj_heading = headings
+        self._has_smooth = True
         self.update()
 
     def set_lookahead_point(self, x: float, y: float):
@@ -94,7 +134,16 @@ class MapView(QWidget):
     def clear_reference_trajectory(self):
         self._ref_traj_x.clear()
         self._ref_traj_y.clear()
+        self._ref_traj_heading.clear()
+        self._smooth_traj_x.clear()
+        self._smooth_traj_y.clear()
+        self._smooth_traj_heading.clear()
+        self._anomaly_markers.clear()
         self._has_lookahead = False
+        self._has_heading = False
+        self._has_smooth = False
+        self._has_ref_start = False
+        self._has_dist_line = False
         self.update()
 
     def set_obstacles(self, obstacles: list):
@@ -104,6 +153,39 @@ class MapView(QWidget):
 
     def clear_obstacles(self):
         self._obstacles.clear()
+        self.update()
+
+    def set_anomaly_markers(self, markers: list[tuple[float, float]]):
+        """设置 A1-06 航向跳变异常标记位置 [(x,y), ...]"""
+        self._anomaly_markers = markers
+        self.update()
+
+    def clear_anomaly_markers(self):
+        self._anomaly_markers.clear()
+        self.update()
+
+    def set_ref_start_marker(self, x: float, y: float):
+        """设置参考线起点标记 (轨迹测试 A1-07)"""
+        self._ref_start_x = x
+        self._ref_start_y = y
+        self._has_ref_start = True
+        self.update()
+
+    def clear_ref_start_marker(self):
+        self._has_ref_start = False
+        self.update()
+
+    def set_distance_line(self, x1: float, y1: float, x2: float, y2: float):
+        """设置车辆→参考线起点距离辅助线 (轨迹测试 A1-07)"""
+        self._dist_line_x1 = x1
+        self._dist_line_y1 = y1
+        self._dist_line_x2 = x2
+        self._dist_line_y2 = y2
+        self._has_dist_line = True
+        self.update()
+
+    def clear_distance_line(self):
+        self._has_dist_line = False
         self.update()
 
     def set_scale(self, scale: float):
@@ -214,8 +296,23 @@ class MapView(QWidget):
             # 网格
             self._draw_grid(painter)
 
-            # 参考轨迹
-            self._draw_reference_trajectory(painter)
+            # 原始轨迹: 亮绿连线 + 黑色三角箭头
+            if self._has_heading:
+                self._draw_trajectory_arrows(painter, self._ref_traj_x, self._ref_traj_y,
+                                             self._ref_traj_heading,
+                                             QColor(0, 210, 100, 180),
+                                             QColor(10, 10, 10, 240))
+
+            # 平滑后轨迹: 亮红线 + 深红三角箭头
+            if self._has_smooth:
+                self._draw_trajectory_arrows(painter, self._smooth_traj_x, self._smooth_traj_y,
+                                             self._smooth_traj_heading,
+                                             QColor(255, 80, 80, 200),
+                                             QColor(180, 20, 20, 240))
+
+            # A1-06 航向跳变异常标记
+            for wx, wy in self._anomaly_markers:
+                self._draw_anomaly_marker(painter, wx, wy)
 
             # 障碍物
             self._draw_obstacles(painter)
@@ -223,6 +320,14 @@ class MapView(QWidget):
             # 预瞄点
             if self._has_lookahead:
                 self._draw_lookahead_point(painter)
+
+            # 参考线起点标记 (轨迹测试)
+            if self._has_ref_start:
+                self._draw_ref_start_marker(painter)
+
+            # 距离辅助线 (轨迹测试)
+            if self._has_dist_line:
+                self._draw_distance_line(painter)
 
             # 轨迹
             self._draw_trail(painter)
@@ -341,6 +446,113 @@ class MapView(QWidget):
                 path.lineTo(sx, sy)
         painter.drawPath(path)
 
+    def _draw_trajectory_arrows(self, painter: QPainter,
+                                 xs: list[float], ys: list[float],
+                                 headings: list[float],
+                                 line_color: QColor, head_color: QColor):
+        """以航向箭头链绘制轨迹线，替代虚线
+
+        每个轨迹点之间用短箭身连接形成连续线条，
+        每隔若干点绘制实心三角箭头表示方向。
+        """
+        n = len(xs)
+        if n < 2:
+            return
+
+        # 箭头密度: 加大
+        head_step = max(2, n // 30)
+
+        # 线段步长
+        line_step = max(1, n // 500) if self._scale > 2.0 else max(1, n // 250)
+
+        # 箭头尺寸: 最小 15px
+        arrow_len = max(15.0, 40.0 / max(self._scale, 0.1))
+        head_len = arrow_len * 0.55
+
+        # 实心填充
+        fill_color = QColor(head_color.red(), head_color.green(),
+                            head_color.blue(), 200)
+
+        # ── 画连接线 (每个点之间, 粗线) ──
+        painter.setPen(QPen(line_color, 2.5, Qt.SolidLine))
+        painter.setBrush(Qt.NoBrush)
+        prev_sx, prev_sy = None, None
+        for i in range(0, n, line_step):
+            sx, sy = self._world_to_screen(xs[i], ys[i])
+            if prev_sx is not None:
+                painter.drawLine(int(prev_sx), int(prev_sy), int(sx), int(sy))
+            prev_sx, prev_sy = sx, sy
+
+        # ── 画三角箭头 (每隔 head_step 个点) ──
+        for i in range(0, n, head_step):
+            hdg = headings[i]
+            wx, wy = xs[i], ys[i]
+            sx, sy = self._world_to_screen(wx, wy)
+
+            tip_x = sx + arrow_len * math.cos(hdg)
+            tip_y = sy - arrow_len * math.sin(hdg)
+
+            base_x = tip_x - head_len * math.cos(hdg)
+            base_y = tip_y + head_len * math.sin(hdg)
+
+            wing_len = head_len * 0.55
+            angle_l = hdg + math.pi * 0.55
+            angle_r = hdg - math.pi * 0.55
+
+            arrow_poly = [
+                QPointF(tip_x, tip_y),
+                QPointF(base_x + wing_len * math.cos(angle_l),
+                        base_y - wing_len * math.sin(angle_l)),
+                QPointF(base_x + wing_len * math.cos(angle_r),
+                        base_y - wing_len * math.sin(angle_r)),
+            ]
+
+            painter.setPen(QPen(head_color.darker(130), 1.5, Qt.SolidLine))
+            painter.setBrush(fill_color)
+            painter.drawPolygon(QPolygonF(arrow_poly))
+
+    def _draw_anomaly_marker(self, painter: QPainter, wx: float, wy: float):
+        """绘制 A1-06 航向跳变异常标记 (橙色菱形 + !)"""
+        sx, sy = self._world_to_screen(wx, wy)
+        r = 8  # 半径 px
+
+        # 橙色菱形
+        diamond = [
+            QPointF(sx, sy - r),
+            QPointF(sx + r, sy),
+            QPointF(sx, sy + r),
+            QPointF(sx - r, sy),
+        ]
+        painter.setPen(QPen(QColor(255, 140, 20, 255), 2.5, Qt.SolidLine))
+        painter.setBrush(QColor(255, 100, 0, 120))
+        painter.drawPolygon(QPolygonF(diamond))
+
+        # ! 标记
+        font = QFont("Arial", 10, QFont.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255, 255))
+        painter.drawText(int(sx) - 3, int(sy) + 4, "!")
+
+    def _draw_smoothed_trajectory(self, painter: QPainter):
+        """绘制平滑后参考轨迹 (深红色虚线)"""
+        if len(self._smooth_traj_x) < 2:
+            return
+
+        pen = QPen(QColor(200, 60, 60, 200), 2.5, Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        path = QPainterPath()
+        first = True
+        for wx, wy in zip(self._smooth_traj_x, self._smooth_traj_y):
+            sx, sy = self._world_to_screen(wx, wy)
+            if first:
+                path.moveTo(sx, sy)
+                first = False
+            else:
+                path.lineTo(sx, sy)
+        painter.drawPath(path)
+
     def _draw_obstacles(self, painter: QPainter):
         """绘制障碍物（黄色填充矩形 + ID 标签）"""
         for obs in self._obstacles:
@@ -379,6 +591,32 @@ class MapView(QWidget):
         cross = 10
         painter.drawLine(int(sx - cross), int(sy), int(sx + cross), int(sy))
         painter.drawLine(int(sx), int(sy - cross), int(sx), int(sy + cross))
+
+    def _draw_ref_start_marker(self, painter: QPainter):
+        """绘制参考线起点标记 (绿色实心圆 + 标签)"""
+        sx, sy = self._world_to_screen(self._ref_start_x, self._ref_start_y)
+
+        # 实心圆
+        painter.setPen(QPen(QColor(0, 255, 136, 220), 2, Qt.SolidLine))
+        painter.setBrush(QBrush(QColor(0, 255, 136, 180)))
+        r = 7
+        painter.drawEllipse(QPointF(sx, sy), r, r)
+
+        # 标签
+        font = QFont("Arial", 9, QFont.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor(0, 255, 136, 255))
+        painter.drawText(int(sx) + 10, int(sy) - 10, "起点")
+
+    def _draw_distance_line(self, painter: QPainter):
+        """绘制车辆→参考线起点距离辅助线 (橙色虚线)"""
+        sx1, sy1 = self._world_to_screen(self._dist_line_x1, self._dist_line_y1)
+        sx2, sy2 = self._world_to_screen(self._dist_line_x2, self._dist_line_y2)
+
+        pen = QPen(QColor(255, 160, 40, 180), 2, Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(int(sx1), int(sy1), int(sx2), int(sy2))
 
     def _draw_vehicle(self, painter: QPainter):
         """绘制车辆俯视图（含车身、车轮及转向状态）"""
