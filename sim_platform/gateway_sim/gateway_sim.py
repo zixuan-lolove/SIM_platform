@@ -95,6 +95,7 @@ class GatewaySim:
 
         # 当前任务信息
         self._current_task_sn: str = ""
+        self._current_task_file: str = ""  # 当前任务的轨迹文件路径
         self._current_task_type: int = 0
         self._command_type: int = 0       # 从下发任务转发的 Command.commandType
         self._task_status: int = 0       # 0=idle, 1=executing, 2=complete
@@ -219,9 +220,15 @@ class GatewaySim:
         if not file_path:
             return False
 
-        # 同任务号跳过 (retained 消息在 MQTT 重连后重复下发)
-        if dispatch_task.task_sn == self._current_task_sn and self._current_task_sn:
-            logger.info(f"[GatewaySim] Task sn={dispatch_task.task_sn} already loaded, skipping")
+        # 同任务号 + 同轨迹文件 → 真正的重复下发，跳过加载
+        # 同任务号 + 不同文件 → 云端更新了任务，需重新加载
+        same_sn = (dispatch_task.task_sn == self._current_task_sn and self._current_task_sn)
+        same_file = (file_path == self._current_task_file)
+        if same_sn and same_file:
+            if dispatch_task.command_type != self._command_type:
+                logger.info(f"[GatewaySim] Task sn={dispatch_task.task_sn} commandType "
+                            f"updated: {self._command_type} → {dispatch_task.command_type}")
+                self._command_type = dispatch_task.command_type
             return True
 
         # 必须在 load_task_file 之前设置 _action_seq，
@@ -231,6 +238,7 @@ class GatewaySim:
         result = self.load_task_file(file_path)
         if result:
             self._current_task_sn = dispatch_task.task_sn
+            self._current_task_file = file_path
             self._current_task_type = dispatch_task.task_type
             # 从下发任务转发 commandType (Command.commandType)
             self._command_type = dispatch_task.command_type

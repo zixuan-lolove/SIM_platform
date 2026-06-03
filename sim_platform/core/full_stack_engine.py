@@ -152,6 +152,7 @@ class FullStackEngine(SimEngine):
 
         # 当前任务 SN (用于判断 retained 消息是否重复)
         self._last_task_sn: str = ""
+        self._last_task_file: str = ""
 
         # 默认 AUTO 模式
         self.control_mode = ControlMode.AUTO
@@ -207,21 +208,33 @@ class FullStackEngine(SimEngine):
         if not dt.task_file_path:
             return
 
-        # 同一任务号不重复初始化 (MQTT 重连时 retained 消息重复下发)
+        # 同任务号 + 同文件 → retained 重复消息，跳过
+        # 同任务号 + 不同文件 → 云端更新了轨迹，需重算 ENU（但不重置车辆）
         if dt.task_sn == self._last_task_sn and self._last_task_sn:
-            logger.debug(f"[FullStack] Task sn={dt.task_sn} already initialized, skipping")
+            if dt.task_file_path == self._last_task_file:
+                logger.debug(f"[FullStack] Task sn={dt.task_sn} already initialized, skipping")
+                return
+            # 文件变了，重算 ENU 但不重置车辆位置和参考原点
+            logger.info(f"[FullStack] Task sn={dt.task_sn} file updated, recomputing ENU")
+            self._recompute_traj_enu()
+            self._full_stack_controller.reset()
+            self._last_task_file = dt.task_file_path
             return
 
         ref = self.gateway.reference_line_manager.current
         if not ref.points:
             return
 
+        old_sn = self._last_task_sn
+        is_first_task = (old_sn == "")
         logger.info(f"[FullStack] Cloud task initializing: sn={dt.task_sn}, "
-                    f"points={len(ref.points)}")
+                    f"points={len(ref.points)}, is_first={is_first_task}")
         self._last_task_sn = dt.task_sn
+        self._last_task_file = dt.task_file_path
 
-        # 任务首点是最准确的参考原点，覆盖默认值（INS 显式设定时不覆盖）
-        if not self._ref_from_ins:
+        # 首个任务: 从轨迹首点设定坐标参考原点
+        # 后续新任务: 保持已有参考原点不变，避免车辆 ENU 坐标跳变
+        if is_first_task:
             self._ref_lat = ref.points[0].lat
             self._ref_lon = ref.points[0].lon
             self._converter.set_reference(self._ref_lat, self._ref_lon)
@@ -231,9 +244,13 @@ class FullStackEngine(SimEngine):
 
         self._full_stack_controller.reset()
 
-        # 车辆初始位置设为轨迹起点，航向取轨迹第一个点
-        init_theta = ref.points[0].theta if ref.points else 0.0
-        self.reset(VehicleState(x=0.0, y=0.0, theta=init_theta), clear_trail=False)
+        # 首个任务: 车辆置于轨迹起点；后续任务: 车辆保持当前位置不停车
+        if is_first_task:
+            init_theta = ref.points[0].theta if ref.points else 0.0
+            self.reset(VehicleState(x=0.0, y=0.0, theta=init_theta), clear_trail=False)
+        else:
+            logger.info(f"[FullStack] New task sn={dt.task_sn} replacing old sn={old_sn}, "
+                        f"vehicle keeps current position ({self.state.x:.2f}, {self.state.y:.2f})")
 
     def _on_move_authority_for_ref(self, topic: str, msg) -> None:
         """任务下载失败时，用 MA 的 startPoint 初始化坐标转换器
@@ -364,6 +381,14 @@ class FullStackEngine(SimEngine):
                                    f"has_task={has_task}, has_loc={has_loc}, "
                                    f"has_ma={has_ma}, result_pts={n_pts}")
             self._last_planning_time = self._sim_time
+
+        # 档位: 无轨迹/无任务/任务完成 → P档; 前进段 → D档; 倒车段 → R档
+        task_done = (self._latest_planning_result and self._latest_planning_result.task_finish)
+        if task_done or not self._planning_traj or not self.ref_mgr.current.points:
+            self.target_gear = 0  # P档
+        else:
+            ref_dir = self.ref_mgr.current.direction
+            self.target_gear = 1 if ref_dir == 0 else 3
 
         # ── 阶段 4: 控制指令生成 ──
         if (
@@ -553,7 +578,12 @@ class FullStackEngine(SimEngine):
             self._ref_lat = 0.0
             self._ref_lon = 0.0
             self._last_task_sn = ""
+            self._last_task_file = ""
         self._full_stack_controller.reset()
+
+    def stop(self) -> None:
+        """全栈模式无手动驾驶，stop 不切换 control_mode"""
+        self._running = False
 
     def emergency_stop(self) -> None:
         super().emergency_stop()

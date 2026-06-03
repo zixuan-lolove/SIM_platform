@@ -566,6 +566,16 @@ class RealCloudClient:
             dispatch_task=dispatch,
             timestamp=time.time(),
         )
+        action_details = []
+        for a in actions:
+            action_details.append(
+                f"type={a.action_type}, toPoint=({a.lat:.6f},{a.lon:.6f}), hdg={a.heading:.1f}°"
+            )
+        logger.info(f"[RealCloud] DispatchTask received: sn={task_sn}, "
+                    f"taskType={dispatch_task_proto.taskType}, "
+                    f"commandType={command.commandType}, "
+                    f"actions=[{' | '.join(action_details)}], "
+                    f"file={file_name}")
         self._bus.publish(CLOUD_DISPATCH_TASK, cd_task)
 
     def _download_and_extract_task(self, file_name: str) -> str:

@@ -57,6 +57,7 @@ class PlanningFrame:
         self.is_over_time: bool = False
         self.action_type: int = 0      # 当前执行的 action 类型 (1=STOP,2=LOAD,3=DUMP,4=LIFT)
         self.action_status: int = 0    # 0=idle, 1=executing, 2=complete
+        self.advance_segment: bool = False  # 本周期发生了参考线段切换
 
         # 传感器时间戳 (用于超时检测)
         self.last_localization_time: float = 0.0
@@ -94,6 +95,7 @@ class PlanningSim:
         # 任务状态
         self._action_seq: list[Action] = []
         self._task_traj: Optional[TaskTraj] = None
+        self._last_task_sn: str = ""    # 用于判断任务更新 vs 新任务
         self._pending_validation: bool = False  # 新任务需在 plan() 中做 2m 邻近校验
 
         # 传感器时间戳
@@ -243,20 +245,32 @@ class PlanningSim:
         if not task_traj.points:
             return
 
+        same_sn = (task.task_sn == self._last_task_sn and self._last_task_sn)
         self._task_traj = task_traj
         self._ref_mgr.update_from_task(task_traj)
         self._action_seq = list(task.action_seq)
-        self._decision.reset()
-        self._pending_validation = True
-        logger.info(f"[PlanningSim] New task: {len(task_traj.points)} pts, "
-                    f"actions={len(self._action_seq)}, "
-                    f"types={[a.action_type for a in self._action_seq]}")
+        self._last_task_sn = task.task_sn
+
+        if same_sn:
+            # 同 sn 任务更新 (轨迹文件变化): 保留决策进度 (task_index 等)，
+            # 仅做邻近校验确保车辆与新轨迹对齐
+            self._pending_validation = True
+            logger.info(f"[PlanningSim] Task updated (same sn={task.task_sn}): "
+                        f"{len(task_traj.points)} pts, decision state preserved")
+        else:
+            # 新任务: 完整重置
+            self._decision.reset()
+            self._pending_validation = True
+            logger.info(f"[PlanningSim] New task: {len(task_traj.points)} pts, "
+                        f"actions={len(self._action_seq)}, "
+                        f"types={[a.action_type for a in self._action_seq]}")
 
     def reset(self) -> None:
         """重置 Planning 状态"""
         self._decision.reset()
         self._task_traj = None
         self._action_seq.clear()
+        self._last_task_sn = ""
         self._latest_move_authority = None
         self._latest_obstacles.clear()
         self._pending_validation = False

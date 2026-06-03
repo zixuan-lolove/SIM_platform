@@ -42,7 +42,7 @@ class SimEngine:
         # 控制输入（由 UI 面板或控制器写入）
         self.target_velocity_kmh: float = 0.0     # 目标车速 (km/h)
         self.target_steer_sw_deg: float = 0.0     # 目标方向盘转角 (deg)
-        self.target_gear: int = 3                  # 目标档位 (D)
+        self.target_gear: int = 0                  # 目标档位 (P) — 无任务时默认驻车
         self.target_brake_pressure: float = 0.0    # 目标制动压力 (MPa)
 
         # 轨迹记录
