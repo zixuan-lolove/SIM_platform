@@ -57,7 +57,6 @@ class PlanningFrame:
         self.is_over_time: bool = False
         self.action_type: int = 0      # 当前执行的 action 类型 (1=STOP,2=LOAD,3=DUMP,4=LIFT)
         self.action_status: int = 0    # 0=idle, 1=executing, 2=complete
-        self.advance_segment: bool = False  # 本周期发生了参考线段切换
 
         # 传感器时间戳 (用于超时检测)
         self.last_localization_time: float = 0.0

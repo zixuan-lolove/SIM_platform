@@ -79,7 +79,7 @@ class BusinessDecision:
         # 路权处理 (C++ lines 34-51: 无条件计算 autor_index + min-tracking + clamp)
         self._update_stop_from_authority(frame)
 
-        # 参考线段切换: 车辆接近当前段末尾且目标在下一段时，切到倒车段
+        # 段切换: 车到段尾且 STOP 目标在下一段时切段
         self._check_segment_advance(frame)
 
         # 当前 action 类型 (在完成判定之前设置，确保完成时上报的是已完成 action 的类型)
@@ -115,41 +115,26 @@ class BusinessDecision:
         frame.key_index = frame.ref_mgr.find_closest_index(loc.x, loc.y)
 
     def _check_segment_advance(self, frame: "PlanningFrame") -> None:
-        """参考线段切换: 车辆接近当前段末尾且目标在下一段时，自动切入下一段
-
-        前进→倒车: direction 1→0, gear 由 D 切 R
-        倒车→前进: direction 0→1, gear 由 R 切 D
-        """
+        """段切换: 车到当前段末尾(key_index ≥ end_index-3)且 STOP 目标在下一段时切段"""
         if not frame.ref_mgr:
             return
+        if frame.ref_mgr.current_index + 1 >= len(frame.ref_mgr._ref_lines):
+            return
+        if not (frame.action_seq and self._task_index < len(frame.action_seq)):
+            return
+        action = frame.action_seq[self._task_index]
+        if action.action_type != STOP_ACTION:
+            return
         current = frame.ref_mgr.current
-        if not current.points:
+        next_seg = frame.ref_mgr._ref_lines[frame.ref_mgr.current_index + 1]
+        # 车到段尾
+        if frame.key_index < current.end_index - 3:
             return
-
-        # 检查是否还有下一段
-        next_idx = frame.ref_mgr._current_idx + 1
-        if next_idx >= len(frame.ref_mgr._ref_lines):
-            return  # 已是最后一段
-
-        next_seg = frame.ref_mgr._ref_lines[next_idx]
-
-        # 判断是否需要切换: key_index 接近当前段末尾
-        near_end = (frame.key_index >= current.end_index - 5)
-        if not near_end:
-            return
-
-        # 检查 STOP 目标是否在下一段
-        if frame.action_seq and self._task_index < len(frame.action_seq):
-            action = frame.action_seq[self._task_index]
-            if action.action_type == STOP_ACTION:
-                all_pts = frame.ref_mgr.get_all_points()
-                if all_pts:
-                    task_idx = frame.ref_mgr.find_closest_by_latlon(action.lat, action.lon)
-                    if task_idx >= next_seg.start_index:
-                        frame.ref_mgr.advance_to_next()
-                        frame.advance_segment = True
-                        logger.info(f"[BizDecision] Segment advance: {current.direction}→{next_seg.direction}, "
-                                    f"key_idx={frame.key_index}, task_idx={task_idx}")
+        # STOP 目标在下一段
+        task_idx = frame.ref_mgr.find_closest_by_latlon(action.lat, action.lon)
+        if task_idx >= next_seg.start_index:
+            frame.ref_mgr.advance_to_next()
+            logger.info(f"[BizDecision] Segment advance: key_idx={frame.key_index}, task_idx={task_idx}")
 
     def _update_stop_from_authority(self, frame: "PlanningFrame") -> None:
         """路权处理 — 对应 C++ BussinessDecision::proc lines 34-51
@@ -180,16 +165,20 @@ class BusinessDecision:
                 )
             return
 
-        # 在当前参考线上找最近点 (C++ lines 44-45: getCurrentReferenceLine())
-        autor_index = 0
-        best_dist = float("inf")
-        for i, p in enumerate(ref.points):
-            dlat = p.lat - end_lat
-            dlon = p.lon - end_lon
-            d = dlat * dlat + dlon * dlon
-            if d < best_dist:
-                best_dist = d
-                autor_index = i
+        # 优先用云端下发的 pointIndex，GPS 全段匹配做 fallback
+        if ma is not None and ma.stop_index > 0:
+            autor_index = ma.stop_index
+        else:
+            all_pts = frame.ref_mgr.get_all_points()
+            autor_index = 0
+            best_dist = float("inf")
+            for i, p in enumerate(all_pts):
+                dlat = p.lat - end_lat
+                dlon = p.lon - end_lon
+                d = dlat * dlat + dlon * dlon
+                if d < best_dist:
+                    best_dist = d
+                    autor_index = i
 
         # MA 端点扩大时重置 sentinel，避免历史小值锁死 stop_index
         # (MA 端点缩小时仍用 min-tracking 保安全)
@@ -198,18 +187,20 @@ class BusinessDecision:
             frame.ref_mgr.stop_index = 10 ** 9  # 重置，允许扩大
         frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index, autor_index)
 
-        # 无条件钳位到参考线末尾 (C++ lines 49-51)
-        frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index, len(ref.points) - 1)
+        # 无条件钳位到参考线末尾 (全段点总数)
+        frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index,
+                                       frame.ref_mgr._total_points - 1)
 
         # 诊断日志 (前 3 次 + 每 500 周期)
         if not hasattr(self, '_stop_log_cnt'):
             self._stop_log_cnt = 0
         self._stop_log_cnt += 1
         if self._stop_log_cnt <= 3 or self._stop_log_cnt % 500 == 0:
+            src = "cloud" if (ma and ma.stop_index > 0) else "gps"
             logger.info(f"[BizDecision] stop_index: {old_stop} → autor={autor_index} "
                         f"→ final={frame.ref_mgr.stop_index} "
-                        f"(ep=({end_lat:.6f},{end_lon:.6f}), n_pts={len(ref.points)}, "
-                        f"ma={'set' if ma else 'None'})")
+                        f"(ep=({end_lat:.6f},{end_lon:.6f}), total_pts={frame.ref_mgr._total_points}, "
+                        f"ma={'set' if ma else 'None'}, src={src})")
 
     def _current_task_finish(self, frame: "PlanningFrame") -> bool:
         """判断当前动作是否完成"""
@@ -219,43 +210,36 @@ class BusinessDecision:
         action = frame.action_seq[self._task_index]
 
         if action.action_type == STOP_ACTION:
-            # STOP 完成判定: 位置 + 航向 双重校验
-            #   - 位置: key_index 与 task_index 差 < 2 点 (~1m)
-            #   - 航向: 车辆航向与目标航向差 < 2°
-            # task_index 也加航向匹配，避免 GPS 相近但航向相反的点被误选
+            # STOP 完成: 位置(1m) + 航向(2°) + 参考线索引 三重校验
             result = False
-            pts = frame.ref_mgr.get_all_points()
-            if pts and frame.localization:
-                # 目标航向 (math angle)
+            if frame.ref_mgr and frame.localization:
+                # 1. task_index: GPS+航向匹配，避免前进/倒车段混淆
                 target_theta = math.radians((90.0 - action.heading) % 360.0)
                 if target_theta > math.pi:
                     target_theta -= 2.0 * math.pi
 
-                # 找 task_index: GPS 距离 + 航向匹配 (优先航向一致的点)
+                pts = frame.ref_mgr.get_all_points()
                 best_idx = 0
                 best_score = float("inf")
                 for i, p in enumerate(pts):
-                    # GPS 距离 (度²)
                     d_gps = (p.lat - action.lat) ** 2 + (p.lon - action.lon) ** 2
-                    # 航向差 (rad), 归一化
                     d_hdg = abs(math.atan2(math.sin(p.theta - target_theta),
                                            math.cos(p.theta - target_theta)))
-                    # 综合评分: 航向差 > 5° 时大幅惩罚
                     if d_hdg > math.radians(5.0):
-                        d_hdg += 1000.0  # 航向不匹配的直接排到后面
+                        d_hdg += 1000.0  # 排除航向不匹配的段
                     score = d_gps + d_hdg * 1e-5
                     if score < best_score:
                         best_score = score
                         best_idx = i
                 task_index = best_idx
 
+                # 2. 位置: 车在目标点 1m 内
                 position_ok = (frame.key_index > task_index - 2)
 
-                # 车辆当前航向与目标航向差
-                heading_err = abs(
-                    math.atan2(math.sin(frame.localization.theta - target_theta),
-                               math.cos(frame.localization.theta - target_theta))
-                )
+                # 3. 航向: 车头朝向与目标差 < 2°
+                heading_err = abs(math.atan2(
+                    math.sin(frame.localization.theta - target_theta),
+                    math.cos(frame.localization.theta - target_theta)))
                 heading_ok = (heading_err < math.radians(2.0))
 
                 if position_ok and heading_ok:
@@ -264,7 +248,6 @@ class BusinessDecision:
                 else:
                     frame.stop = False
 
-                # C++ line 83: updateStopIndex(task_index)
                 frame.ref_mgr.stop_index = min(frame.ref_mgr.stop_index, task_index)
             return result
 

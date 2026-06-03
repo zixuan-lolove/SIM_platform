@@ -108,7 +108,7 @@ class ReferenceLineManager:
         """从 TaskTraj 构建参考线列表
 
         按 is_reverse 标志拆分: 连续相同 is_reverse 值的点组成一段参考线。
-        is_reverse=True → direction=0 (倒车), is_reverse=False → direction=1 (前进)
+        is_reverse=True→前进, is_reverse=False→倒车
         """
         self._ref_lines.clear()
         self._stop_index = 10 ** 9  # 重置为 sentinel，匹配 C++ 新任务时 stop_index 未初始化
@@ -127,7 +127,7 @@ class ReferenceLineManager:
             if pts[i].is_reverse != current_is_reverse:
                 self._ref_lines.append(ReferenceLine(
                     points=pts[segment_start:i],
-                    direction=0 if current_is_reverse else 1,
+                    direction=1 if current_is_reverse else 0,
                     start_index=segment_start,
                     end_index=i - 1,
                 ))
@@ -137,7 +137,7 @@ class ReferenceLineManager:
         # 最后一段
         self._ref_lines.append(ReferenceLine(
             points=pts[segment_start:],
-            direction=0 if current_is_reverse else 1,
+            direction=1 if current_is_reverse else 0,
             start_index=segment_start,
             end_index=len(pts) - 1,
         ))
