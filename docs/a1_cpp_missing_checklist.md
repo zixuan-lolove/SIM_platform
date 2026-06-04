@@ -1,7 +1,7 @@
 # C++ 代码工程功能开发 — 缺失项清单
 
-> 版本：V3.4
-> 日期：2026-06-03
+> 版本：V3.5
+> 日期：2026-06-04
 > 编制依据：C++ 源码审查 (gateway/ planning/ control/ can_transformer) 对照仿真 Python 端
 > 状态：持续更新
 
@@ -182,25 +182,26 @@ STOP_REASON_BIT = {
 
 ---
 
-### C-02：空端点路权（MA）容错 — 防止车辆被"假停车指令"锁死
+### C-02：路权（MA）端点处理与停车逻辑
 
-**问题描述**（通俗版）：云端在没有任务时会先发一条"停车"指令（`endPoint` 为空，附带信息"车辆无任务"），程序收到后把允许行驶的终点锁在起点位置。等云端真正分配任务、下发有效路权终点后，程序的安全机制要求"终点只能缩小不能扩大"，导致有效终点被忽略，车辆永远停在原地。
+**问题描述**（通俗版）：云端未发路权或发了空路权（"车辆无任务"、"车道非调度路径"）时，车辆应该停车等待，而不是自由行驶。等云端下发有效路权后，车辆再按路权终点行驶。
 
-**技术细节**：云端下发的 `MovemntAuthoritySend` 中 `safeOccupied.endPoint` 为空时（`lat=0, lon=0`），查找参考线上离 `(0,0)` 最近的点 → 索引为 0。min-tracking 机制执行 `stop_index = min(stop_index, autor_index)` 后 `stop_index` 变为 0，VelocityPlanner 将所有轨迹点速度置零。后续即使收到有效路权（endPoint 坐标 = 轨迹终点），`min(0, 1894) = 0` 导致无法恢复。
+**技术细节**：`updateStopFromAuthority` 中，无 MA（`ma is None`）或 `endPoint` 为空（`lat=0, lon=0`）时，`autor_index` 直接置 0，min-tracking 将 `stop_index` 拉到 0，车辆停车。有效 MA 到达后，`autor_index > old_stop(0)` 触发扩展重置 → `stop_index` 更新为正确的路权值，车辆放行。云端下发有效 MA 后又发空 MA → 再次停车，再发有效 → 再走。
 
-**Python 端对照**：已实现容错（2026-06-01 更新）：
+**Python 端对照**：已实现（2026-06-04 更新）：
 
-- [x]空 endpoint 守卫：`endPoint` 为 `(0,0)` 时视为无效指令，跳过不处理
-- [x]空 MA 诊断日志：打印云端下发的具体原因（`safe.info`），便于排查
-- [x]修复 endpoint fallback 的真值判断 bug（Python 中 `0.0` 是 falsy，导致空值错误回退到另一个同样为 0 的备用值）
+- [x]无 MA 或空 endpoint → `autor_index=0` → stop_index=0 → 停车
+- [x]有效 MA 到达 → autor_index > 0 → 扩展重置 sentinel → stop_index 更新 → 车辆放行
+- [x]空 MA 诊断日志：打印云端下发原因（`safe.info`），便于排查
+- [x]端点来源优先级：云端 `pointIndex` > GPS 全段匹配
 
 **缺失项**：
 
 | 编号 | 缺失项 | 位置 | 说明 |
 |------|--------|------|------|
-| C-02-C1 | 空端点 MA 守卫 | `business_decision.cc:updateStopFromAuthority` | `endPoint` 为 `(0,0)` 时识别为无效路权指令，不更新 `stop_index` |
-| C-02-C2 | 空 MA 诊断日志 | `gateway.cc:DealMovemntAuthoritySend` | 收到空路权时输出 WARNING 日志，打印云端附带的原因信息 |
-| C-02-C3 | endpoint fallback 健壮性 | `gateway.cc:DealMovemntAuthoritySend` | `end_pt.lat == 0` 时不应 fallback 到 `list[-1].lat`（同样为 0），应保持为 0 让下游识别 |
+| C-02-C1 | 无 MA / 空 endpoint → 停车 | `business_decision.cc:updateStopFromAuthority` | `ma is None` 或 `endPoint=(0,0)` 时 `autor_index=0`，min-tracking 后 `stop_index=0` |
+| C-02-C2 | 有效 MA 到达 → 放行 | `business_decision.cc:updateStopFromAuthority` | `autor_index > old_stop` 时重置 sentinel，允许扩大 |
+| C-02-C3 | 空 MA 诊断日志 | `gateway.cc:DealMovemntAuthoritySend` | 收到空路权时输出 WARNING 日志，打印云端附带的原因信息 |
 
 ---
 
@@ -249,23 +250,24 @@ STOP_REASON_BIT = {
 
 ---
 
-### C-05：参考线行驶方向切换（前进↔倒车）未实现
+### C-05：参考线行驶方向映射与段切换（前进↔倒车）未实现
 
-**发现**：参考线按 `is_reverse` 标志拆分为多段（前进段 direction=1，倒车段 direction=0），`advanceToNext()` 方法已定义但从未被调用。车辆永远停在第一段末尾，无法切入倒车段执行掉头/倒车动作。`direction` 字段存储了行驶方向，但未与档位联动。
+**发现**：参考线按 `is_reverse` 标志拆分为多段，`advanceToNext()` 方法已定义但从未被调用。车辆永远停在第一段末尾，无法切入倒车段。`is_reverse` 到 `direction` 的映射关系未明确（数据约定：`is_reverse=True`(1)→前进，`is_reverse=False`(0)→倒车），`direction` 未与档位联动。
 
-**Python 端对照**：已实现（2026-06-03 更新）：
+**Python 端对照**：已实现（2026-06-04 更新）：
 
-- `BusinessDecision._check_segment_advance()` — 检测车辆接近当前段末尾（`key_index >= end_index - 5`）且 STOP 目标在下一段时，调用 `advance_to_next()` 切换参考线段
-- `FullStackEngine.step()` — 每周期根据 `ref_mgr.current.direction` 设置档位：无任务/无参考线/任务完成→P 档，`direction=1`→D 档，`direction=0`→R 档
+- `update_from_task()` — 映射：`is_reverse=True→direction=1(前进)`, `is_reverse=False→direction=0(倒车)`
+- `BusinessDecision._check_segment_advance()` — 精简版：车到当前段末尾（`key_index ≥ end_index-3`）且 STOP 目标在下一段时切段
+- `FullStackEngine.step()` — 档位联动：无任务/任务完成→P 档，`direction=1→D`档，`direction=0→R`档
 - `kinematics.step()` — P 档强制速度为零，R 档时目标速度取负实现倒车
 
 **缺失项**：
 
 | 编号 | 缺失项 | 位置 | 说明 |
 |------|--------|------|------|
-| C-05-C1 | 参考线段切换判定 | `business_decision.cc` | 车辆接近当前段末尾且 STOP 目标在下一段时，调用 `advanceToNext()` 切入下一段 |
-| C-05-C2 | direction→档位联动 + 默认/完成挂P档 | `planning.cc` 或 `control.cc` | 无任务/无参考线/任务完成→P 档，前进段→D 档，倒车段→R 档 |
-| C-05-C3 | STOP 完成判定校验航向 | `business_decision.cc` | 到达 STOP 点时增加航向校验（与目标航向差 < 2°），防止前进段末尾误判为到达倒车段目标 |
+| C-05-C1 | is_reverse→direction 映射 | `reference_line_mgr` | `is_reverse=True→direction=1(前进)`, `is_reverse=False→direction=0(倒车)` |
+| C-05-C2 | direction→档位联动 | `planning.cc` 或 `control.cc` | 无任务/任务完成→P 档，direction=1→D 档，direction=0→R 档 |
+| C-05-C3 | 参考线段切换判定 | `business_decision.cc` | 车到段尾且 STOP 目标在下一段时调用 `advanceToNext()` 切段 |
 
 ---
 
@@ -279,10 +281,83 @@ STOP_REASON_BIT = {
 
 ---
 
+## E 类：Python 仿真端已修复 Bug（C++ 实现时需规避）
+
+> 以下 Bug 在 Python 仿真端发现并已修复（2026-06-04）。C++ 端实现对应功能时需注意规避相同问题。
+
+### E-01：RTKPlanner 全局索引当作段内局部索引使用
+
+**发现位置**：`sim_platform/planning_sim/rtk_planner.py:53-60`
+
+**问题**：`BusinessDecision._update_key_index()` 产出的是全局索引（在整个 task_trajectory 中搜索最近点），但 `RTKPlanner.plan()` 将它当作当前段内的局部索引使用：`pts[key_index]` 和 `range(key_index, len(pts))`。当车辆切换到第二段（倒车段）后，`key_index` 可能远超 `len(current_segment.points)`，导致 `run_road` 为空循环，规划返回空，`_planning_traj` 无法更新。
+
+**现象**：车辆在前进段末尾正常行驶，段切换后 RTKPlanner 返回 `[]`，planning 返回 None，`_planning_traj` 保持前进段旧值，车辆用错误的旧轨迹继续行驶。多段轨迹（前进+倒车）必定触发。
+
+**根因**：`find_closest_index()` 在全局点序列中搜索返回全局索引，但 `RTKPlanner` 只拿到 `ref_mgr.current`（当前段子集），索引坐标系不一致。
+
+**修复**（`planning_sim.py:205-228`）：在 `PlanningSim.plan()` 中将全局索引转换为段内局部索引后再传入 `RTKPlanner.plan()`：
+```python
+seg_start = ref_line.start_index
+local_key = frame.key_index - seg_start
+local_stop = self._ref_mgr.stop_index - seg_start  # sentinel 10^9 保持不动
+# ... RTKPlanner.plan(key_index=local_key, stop_index=local_stop)
+# 结果写回: self._ref_mgr.stop_index = updated_stop + seg_start
+```
+
+**C++ 端影响**：实现 C-05（前进倒车方向切换）时，务必确保 `key_index` 与 `current_reference_line` 的索引坐标系一致。建议参照 Python 修复方案，在 planning 入口处做全局→局部索引转换。
+
+---
+
+### E-02：PurePursuitController 倒车时转向角符号未取反
+
+**发现位置**：`sim_platform/core/controller.py:97-100`
+
+**问题**：Pure Pursuit 公式 `δ = atan(2L·sinα/ld)` 是在**前向行驶**假设下推导的——δ 的正负与后轴横移方向一致。倒车时运动学发生反转：δ>0 使后轴右移（而非左移），导致车辆转向背离目标点。
+
+**几何推演**：车辆倒车，目标在运动方向左侧。sinα>0 → steer>0（左转）。运动学：v<0, steer>0 → yaw_rate = v·tan(δ)/L < 0 → 车头 CW 旋转 → 后轴右移远离目标。应是 steer<0（右转）→ 后轴左移靠近目标。
+
+**修复**（`controller.py:101-103`）：倒车时对 Pure Pursuit 输出取反：
+```python
+if reverse:
+    steer_rad = -steer_rad
+```
+
+**C++ 端影响**：实现 C-05-C2（direction→档位联动）时，C++ `pure_pursuit_controller` 同样需要感知行驶方向。当前 C++ 控制器接口无 `reverse` 参数，倒车横向控制必然发散。
+
+---
+
+### E-03：PurePursuitController 倒车时坐标变换未使用运动方向
+
+**发现位置**：`sim_platform/core/controller.py:80-88`
+
+**问题**：倒车时 `motion_theta = state.theta + π`。若用 `state.theta`（车头朝向）做坐标变换，"前方"是车头方向而非实际运动方向，计算出的 `local_y` 符号与物理含义相反（目标在运动方向左侧却被判为右侧）。
+
+**修复**（`controller.py:82`）：倒车时用 `motion_theta = state.theta + math.pi` 做坐标变换，确保 `local_y` 的符号表示"偏离运动纵轴的方向"（正=运动方向左侧）。
+
+**注意**：此修复与 E-02 存在数学等价关系——`motion_theta` 旋转 180° 使 `local_y` 反号，再对 steer 取反，**净效果与不旋转+不取反相同**。但方案 A（当前实现）的好处是 `cross_track_error = local_y` 基于运动方向，物理语义清晰，正确反映到 DataLogger 和 UI 显示。
+
+**C++ 端影响**：C++ 控制器实现倒车支持时，两种等价方案择一即可。推荐方案 A（motion_theta 变换 + steer 取反），与 Python 端保持一致。
+
+---
+
+### E-04：planning 返回 None 时 FullStackEngine 保留旧轨迹
+
+**发现位置**：`sim_platform/core/full_stack_engine.py:362-364`
+
+**问题**：`planning.plan()` 返回 None 时，`_planning_traj` 未被更新——保留了上一次成功规划周期的轨迹。当段切换瞬间 plan() 返回 None（因 E-01 索引越界），控制器拿着前进段旧轨迹在倒车段上跑。
+
+**现象**：前进段直线轨迹与倒车段起点共线时，`cross_track_error` 恒为 0，车辆沿直线倒退出道路。若轨迹不共线，车辆朝错误方向转向。
+
+**修复**（`full_stack_engine.py:384-387`）：连续 3 次 planning 返回 None → 设置 `_planning_traj = None` → 档位逻辑检测到无轨迹 → 挂 P 档安全停车。
+
+**C++ 端影响**：C++ `planning.cc:mainProc()` 返回空轨迹时，`control.cc` 应挂 P 档停车，而非使用上一个周期的旧 Command。
+
+
 ## 汇总
 
 ```
-总计缺失项: 38 项 (+ 3 个阻塞性 Bug)
+总计缺失项: 42 项 (+ 3 个阻塞性 Bug + 4 个 Python 端已修复 Bug)
+
 
 B 类 — 车云通信协议功能缺失 (19 项):
 ├── B-01 实时定位数据上行:    4 项
@@ -302,6 +377,12 @@ D 类 — 阻塞性 Bug (3 项):
 ├── D-01 localization 回调绑定错误 (严重)
 ├── D-02 ref_line_valid 永为 false (中等)
 └── D-03 is_overtime 无条件 true (中等)
+
+E 类 — Python 端已修复 Bug, C++ 实现需规避 (4 项):    ← 2026-06-04 新增
+├── E-01 RTKPlanner 全局索引当局部索引用导致多段轨迹失效
+├── E-02 PurePursuit 倒车转向角符号未取反
+├── E-03 PurePursuit 倒车坐标变换未用运动方向
+└── E-04 planning 返回 None 时旧轨迹残留
 ```
 
 ### Python 端已实现、C++ 端需同步的能力
@@ -314,7 +395,11 @@ D 类 — 阻塞性 Bug (3 项):
 | driving mode 上报 | 空默认实例 | B-04-C1~C3 |
 | actionStatus/actionType 动态上报 | 硬编码为 0 | B-05-C1~C4 ← **2026-06-01 新增** |
 | B 样条路径平滑集成 | 完整实现但未接入管线 | C-01-C1~C3 |
-| 鉴权成功后未发路权，导致路权终点空置所死 | 无守卫，stop_index 一旦为 0 无法恢复 | C-02-C1~C3 |
+| 路权端点处理：无MA/空MA→停车，有效MA→放行 | 无 MA 或空 MA 时未停车 | C-02-C1~C3 |
 | B样条平滑后 heading 重算 | 原样复制旧 heading，平滑后几何与航向不一致 | C-03-C1~C3 |
 | 曲率数据读取与校验 | 未读取曲率 | C-04-C1~C4 |
 | 前进倒车方向切换 | advanceToNext 未调用，direction 未联动档位 | C-05-C1~C3 |
+| RTKPlanner 全局/局部索引转换 | 未实现，需注意 index 坐标系一致 | E-01 |
+| PurePursuit 倒车转向角取反 | 未实现 | E-02 |
+| PurePursuit 倒车坐标变换（运动方向） | 未实现 | E-03 |
+| planning 失败时清理旧轨迹 | 未实现，需防旧轨迹残留 | E-04 |

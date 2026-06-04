@@ -139,34 +139,29 @@ class BusinessDecision:
     def _update_stop_from_authority(self, frame: "PlanningFrame") -> None:
         """路权处理 — 对应 C++ BussinessDecision::proc lines 34-51
 
-        无条件计算 autor_index；空 endpoint (0,0) 时跳过更新 (云端"停止下发"指令)，
-        避免 min-tracking 将 stop_index 锁死在 0 导致有效 MA 无法恢复。
-        有效 MA 到达后 endpoint 为正确坐标 → stop_index 更新为路权值。
+        无 MA 或 endpoint 为空 → stop_index=0 (停车)；有效 MA 到达后自动扩展。
         """
         if not frame.ref_mgr:
             return
-        ref = frame.ref_mgr.current
-        if not ref.points:
-            return
 
-        # endpoint lat/lon (C++ lines 35-36: 无条件读取，无 MA 时为 0,0)
         ma = frame.move_authority
         end_lat = ma.endpoint_lat if ma is not None else 0.0
         end_lon = ma.endpoint_lon if ma is not None else 0.0
 
-        # 忽略空 endpoint 的 MA: 云端下发"停止下发"/"车辆无任务"时 endpoint 为 (0,0)
-        # 若不拦截，min-tracking 会将 stop_index 锁死在 0，后续有效 MA 无法恢复
-        if abs(end_lat) < 1e-8 and abs(end_lon) < 1e-8:
-            cnt = getattr(self, '_stop_log_cnt', 0)
-            if cnt <= 3 or cnt % 500 == 0:
-                logger.warning(
-                    f"[BizDecision] Ignoring MA with empty endpoint "
-                    f"(lat={end_lat}, lon={end_lon}) — stop_index unchanged"
-                )
-            return
-
+        # 无 MA 或空 endpoint → 停车
+        if ma is None or (abs(end_lat) < 1e-8 and abs(end_lon) < 1e-8):
+            if ma is None:
+                logger.debug("[BizDecision] No MA received, stop_index → 0")
+            else:
+                cnt = getattr(self, '_stop_log_cnt', 0)
+                if cnt <= 3 or cnt % 500 == 0:
+                    logger.warning(
+                        f"[BizDecision] Empty MA endpoint → stop_index=0 "
+                        f"(lat={end_lat}, lon={end_lon})"
+                    )
+            autor_index = 0
         # 优先用云端下发的 pointIndex，GPS 全段匹配做 fallback
-        if ma is not None and ma.stop_index > 0:
+        elif ma.stop_index > 0:
             autor_index = ma.stop_index
         else:
             all_pts = frame.ref_mgr.get_all_points()
@@ -196,7 +191,14 @@ class BusinessDecision:
             self._stop_log_cnt = 0
         self._stop_log_cnt += 1
         if self._stop_log_cnt <= 3 or self._stop_log_cnt % 500 == 0:
-            src = "cloud" if (ma and ma.stop_index > 0) else "gps"
+            if ma is None:
+                src = "none"
+            elif autor_index == 0:
+                src = "stop"
+            elif ma.stop_index > 0:
+                src = "cloud"
+            else:
+                src = "gps"
             logger.info(f"[BizDecision] stop_index: {old_stop} → autor={autor_index} "
                         f"→ final={frame.ref_mgr.stop_index} "
                         f"(ep=({end_lat:.6f},{end_lon:.6f}), total_pts={frame.ref_mgr._total_points}, "
